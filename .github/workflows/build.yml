@@ -26,6 +26,7 @@ jobs:
             --windowed \
             --name "PacketClicker" \
             --add-data "bgm.ogg:." \
+            --add-data "Packet_Clicker.mp3:." \
             packet_clicker.py
 
       - name: Zip .app
@@ -61,6 +62,7 @@ jobs:
             --windowed `
             --name "PacketClicker" `
             --add-data "bgm.ogg;." `
+            --add-data "Packet_Clicker.mp3;." `
             packet_clicker.py
 
       - name: Upload artifact

@@ -68,40 +68,40 @@ try:
 
     # ── Hintergrundmusik (BGM) ──
     # Music: "Going Undercover" by Tomasz Kucza (Magnesus) via OpenGameArt.org (CC-BY 4.0)
-    def _build_fallback_bgm():
-        dur = 8.0
-        buf = array.array('h')
-        for i in range(int(_SR * dur)):
-            t = i / _SR
-            bass = math.sin(2 * math.pi * 41.2 * t) * 0.15
-            if (int(t*4) % 4) == 0: bass *= 1.5
-            blip = 0
-            if (int(t*2) % 8) == 0:
-                bt = t % 0.5
-                blip = math.sin(2 * math.pi * 880 * bt) * math.exp(-bt*15) * 0.1
-            tick = (random.random()*2-1) * 0.03 if (int(t*16) % 2 == 0) else 0
-            v = int(max(-32767, min(32767, (bass + blip + tick) * 32767 * 0.3)))
-            buf.append(v); buf.append(v)
-        return pygame.mixer.Sound(buffer=buf)
+    MUSIC_END  = pygame.USEREVENT + 1
+    INTRO_PATH = _asset("Packet_Clicker.mp3")
+    BGM_PATH   = _asset("bgm.ogg")
+    _bgm_muted = False
 
-    BGM_PATH = _asset("bgm.ogg")
-    if os.path.exists(BGM_PATH):
-        try:
-            pygame.mixer.music.load(BGM_PATH)
-            pygame.mixer.music.set_volume(0.35)
-            def start_bgm(): pygame.mixer.music.play(loops=-1)
-            def set_bgm_muted(muted): pygame.mixer.music.set_volume(0.0 if muted else 0.35)
-        except:
-            BGM = _build_fallback_bgm()
-            BGM.set_volume(0.4)
-            def start_bgm(): BGM.play(loops=-1)
-            def set_bgm_muted(muted): BGM.set_volume(0.0 if muted else 0.4)
-    else:
-        BGM = _build_fallback_bgm()
-        BGM.set_volume(0.4)
-        def start_bgm(): BGM.play(loops=-1)
-        def set_bgm_muted(muted): BGM.set_volume(0.0 if muted else 0.4)
-except: 
+    def _start_bgm_loop():
+        if os.path.exists(BGM_PATH):
+            try:
+                pygame.mixer.music.load(BGM_PATH)
+                pygame.mixer.music.set_volume(0.0 if _bgm_muted else 0.35)
+                pygame.mixer.music.set_endevent(0)
+                pygame.mixer.music.play(loops=-1)
+            except: pass
+
+    def start_bgm():
+        if os.path.exists(INTRO_PATH):
+            try:
+                pygame.mixer.music.load(INTRO_PATH)
+                pygame.mixer.music.set_volume(0.0 if _bgm_muted else 0.35)
+                pygame.mixer.music.set_endevent(MUSIC_END)
+                pygame.mixer.music.play(loops=0)
+                return
+            except: pass
+        _start_bgm_loop()
+
+    def set_bgm_muted(muted):
+        global _bgm_muted
+        _bgm_muted = muted
+        pygame.mixer.music.set_volume(0.0 if muted else 0.35)
+
+except:
+    MUSIC_END = pygame.USEREVENT + 1
+    def _start_bgm_loop(): pass
+    def start_bgm(): pass
     def set_bgm_muted(muted): pass
 
 def play_sfx(name):
@@ -3549,6 +3549,9 @@ def main():
         dt = clock.tick(FPS)
 
         for event in pygame.event.get():
+            if event.type == MUSIC_END:
+                _start_bgm_loop()
+
             if event.type == pygame.QUIT:
                 game.state = "exit_confirm"
 

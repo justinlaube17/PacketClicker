@@ -86,7 +86,7 @@ try:
         if os.path.exists(INTRO_PATH):
             try:
                 pygame.mixer.music.load(INTRO_PATH)
-                pygame.mixer.music.set_volume(0.0 if _bgm_muted else 0.35)
+                pygame.mixer.music.set_volume(0.0 if _bgm_muted else 0.15)
                 pygame.mixer.music.set_endevent(MUSIC_END)
                 pygame.mixer.music.play(loops=0)
                 return

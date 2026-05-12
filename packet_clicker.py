@@ -5,6 +5,12 @@ ESC = Beenden  |  Scrollrad = scrollen  |  Tab-Klick = Ansicht wechseln
 """
 
 import pygame, sys, math, random, json, os, array
+try:
+    import cv2
+    import numpy as np
+    _CV2_AVAILABLE = True
+except ImportError:
+    _CV2_AVAILABLE = False
 
 def _asset(name):
     base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
@@ -3538,12 +3544,47 @@ def debug_click(game: Game, mx, my) -> bool:
     return False
 # ── Hauptschleife ─────────────────────────────────────────────────────
 
+def play_intro_video(path):
+    if not _CV2_AVAILABLE or not os.path.exists(path):
+        return False
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        return False
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30
+    start_bgm()
+    clock_intro = pygame.time.Clock()
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        skip = False
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                cap.release()
+                pygame.quit()
+                sys.exit()
+            if event.type in (pygame.KEYDOWN, pygame.MOUSEBUTTONDOWN):
+                skip = True
+        if skip:
+            break
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w = frame_rgb.shape[:2]
+        surf = pygame.surfarray.make_surface(frame_rgb.swapaxes(0, 1))
+        scaled = pygame.transform.scale(surf, (W, H))
+        screen.blit(scaled, (0, 0))
+        pygame.display.flip()
+        clock_intro.tick(fps)
+    cap.release()
+    return True
+
 def main():
+    intro_played = play_intro_video(_asset("abcdef_abcdef_abcdef_abcdefmp_.mp4"))
     game     = Game()
     net      = NetViz(LEFT_W//2, 335, 90)
     menu_bg  = MenuBackground()
     max_scroll_shop = max(0, len(UPGRADES)*74 + 150 - (H-42))
-    start_bgm()
+    if not intro_played:
+        start_bgm()
 
     while True:
         dt = clock.tick(FPS)

@@ -39,3 +39,33 @@ jobs:
           name: PacketClicker-macOS
           path: PacketClicker_macOS.zip
           retention-days: 30
+
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install pygame==2.6.1 pyinstaller
+
+      - name: Build .exe with PyInstaller
+        run: |
+          pyinstaller `
+            --onefile `
+            --windowed `
+            --name "PacketClicker" `
+            --add-data "bgm.ogg;." `
+            packet_clicker.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PacketClicker-Windows
+          path: dist/PacketClicker.exe
+          retention-days: 30

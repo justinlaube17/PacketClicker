@@ -71,3 +71,34 @@ jobs:
           name: PacketClicker-Windows
           path: dist/PacketClicker.exe
           retention-days: 30
+
+  release:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Windows build
+        uses: actions/download-artifact@v4
+        with:
+          name: PacketClicker-Windows
+          path: release/
+
+      - name: Download macOS build
+        uses: actions/download-artifact@v4
+        with:
+          name: PacketClicker-macOS
+          path: release/
+
+      - name: Publish latest release
+        run: |
+          gh release delete latest --yes 2>/dev/null || true
+          gh release create latest \
+            release/PacketClicker.exe \
+            release/PacketClicker_macOS.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Packet Clicker — Latest Build" \
+            --notes "Automatisch gebaut vom neusten Commit. Windows: PacketClicker.exe · macOS: PacketClicker_macOS.zip"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

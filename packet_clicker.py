@@ -940,11 +940,18 @@ class Game:
     def needs_challenge(self, uid):
         return (uid in TIER_CHALLENGE) and (uid not in self.unlocked)
 
+    def is_challenge_available(self, uid):
+        if uid not in TIER_CHALLENGE: return True
+        order = [u["id"] for u in UPGRADES if u["id"] in TIER_CHALLENGE]
+        idx = order.index(uid)
+        return idx == 0 or order[idx - 1] in self.unlocked
+
     def challenge_cd_left(self, uid):
         return max(0, self.challenge_cooldown.get(uid, 0) - pygame.time.get_ticks())
 
     def start_minigame(self, uid):
         if not self.needs_challenge(uid): return
+        if not self.is_challenge_available(uid): return
         if self.challenge_cd_left(uid) > 0: return
         mg_type = TIER_CHALLENGE[uid]
         show_tutorial = mg_type not in self.mg_tutorials_seen
@@ -2135,7 +2142,15 @@ def draw_shop(game: Game):
         btn_hover = btn_rect.collidepoint(mxp, myp) and clip.collidepoint(mxp, myp)
         if game.needs_challenge(uid):
             cd = game.challenge_cd_left(uid)
-            if cd > 0:
+            available = game.is_challenge_available(uid)
+            if not available:
+                bcol = BORDER
+                bg   = PANEL
+                lbl  = "🔒 LOCKED"
+                dim  = pygame.Surface((card_rect.w, card_rect.h), pygame.SRCALPHA)
+                dim.fill((0, 0, 0, 100))
+                screen.blit(dim, card_rect.topleft)
+            elif cd > 0:
                 bcol = BORDER
                 bg   = PANEL
                 lbl  = f"WAIT {cd/1000:.0f}s"
@@ -2279,7 +2294,9 @@ def shop_click(game: Game, mx, my):
         if btn_x <= mx <= btn_x+btn_w and iy+24 <= my <= iy+68:
             uid = upg["id"]
             if game.needs_challenge(uid):
-                if game.challenge_cd_left(uid) > 0:
+                if not game.is_challenge_available(uid):
+                    play_sfx('error')
+                elif game.challenge_cd_left(uid) > 0:
                     play_sfx('error')
                 else:
                     game.start_minigame(uid)

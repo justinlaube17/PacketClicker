@@ -703,6 +703,7 @@ class Game:
         self.unlocked            = set()     # alle Tiers gelockt, hub via Cable-Patch
         self.minigame            = None      # None oder Minigame-State-Dict
         self.challenge_cooldown  = {}        # uid -> ms timestamp bis wann gesperrt
+        self.mg_tutorials_seen   = set()     # Minigame-Typen für die das Tutorial schon gezeigt wurde
 
         # RFC-Forschung: erst nach Firewall-Kauf zugänglich
         self.rfc_unlocked        = False
@@ -946,6 +947,10 @@ class Game:
         if not self.needs_challenge(uid): return
         if self.challenge_cd_left(uid) > 0: return
         mg_type = TIER_CHALLENGE[uid]
+        show_tutorial = mg_type not in self.mg_tutorials_seen
+        if show_tutorial:
+            self.mg_tutorials_seen.add(mg_type)
+            self.save()
         if mg_type == "frame_forwarder":
             self.minigame = {
                 "type":       "frame_forwarder",
@@ -956,9 +961,11 @@ class Game:
                 "next_spawn": 0,
                 "result":     None,
                 "result_at":  0,
+                "tutorial":   show_tutorial,
             }
         elif mg_type == "cable_patch":
             self.minigame = self._build_cable_patch(uid)
+            self.minigame["tutorial"] = show_tutorial
         elif mg_type == "route_table":
             self.minigame = {
                 "type":        "route_table",
@@ -973,6 +980,7 @@ class Game:
                 "feedback":    None,
                 "result":      None,
                 "result_at":   0,
+                "tutorial":    show_tutorial,
             }
         elif mg_type == "packet_inspector":
             self.minigame = {
@@ -985,10 +993,11 @@ class Game:
                 "time_per_pkt":  MG_PI_TIME_BASE,
                 "deadline":      0,
                 "next_spawn":    pygame.time.get_ticks() + 600 + MG_PI_INTRO_BONUS,
-                "feedback":      None,    # {"type":"correct"/"wrong"/"timeout","at":ms,"verdict":"allow"/"drop"}
+                "feedback":      None,
                 "result":        None,
                 "result_at":     0,
                 "intro":         True,
+                "tutorial":      show_tutorial,
             }
         else:
             return
@@ -1135,6 +1144,7 @@ class Game:
     def _update_minigame(self, dt):
         mg = self.minigame
         if mg is None: return
+        if mg.get("tutorial"): return
         now = pygame.time.get_ticks()
 
         if mg["result"] is not None:
@@ -1410,6 +1420,7 @@ class Game:
                            "rfc_unlocked": self.rfc_unlocked,
                            "show_rfc_intro": self.show_rfc_intro,
                            "show_intro": self.show_intro,
+                           "mg_tutorials_seen": list(self.mg_tutorials_seen),
                            "music_muted": self.music_muted,
                            "sfx_muted": self.sfx_muted,
                            "res_idx": self.res_idx,
@@ -1435,8 +1446,9 @@ class Game:
                 if cnt > 0:
                     self.unlocked.add(uid)
             self.rfc_unlocked   = d.get("rfc_unlocked", False)
-            self.show_rfc_intro = d.get("show_rfc_intro", False)
-            self.show_intro     = d.get("show_intro", False)
+            self.show_rfc_intro      = d.get("show_rfc_intro", False)
+            self.show_intro          = d.get("show_intro", False)
+            self.mg_tutorials_seen   = set(d.get("mg_tutorials_seen", []))
             # Rueckwaertskompatibilitaet: wer Firewall hat, kennt RFC schon
             if self.owned.get("firewall", 0) > 0:
                 self.rfc_unlocked   = True
@@ -2502,6 +2514,94 @@ def _ff_drop_zones():
     return zones
 
 
+MG_TUTORIAL_TEXT = {
+    "cable_patch": {
+        "title": "KABEL VERBINDEN",
+        "lines": [
+            "Verbinde jeden Stecker auf der linken Seite",
+            "mit dem passenden Anschluss auf der rechten Seite.",
+            "",
+            "Klicke einen Stecker an und ziehe ihn",
+            "zur richtigen Buchse — Farben geben Hinweise.",
+            "",
+            "Verbinde alle Paare bevor die Zeit abläuft!",
+        ],
+    },
+    "frame_forwarder": {
+        "title": "FRAME FORWARDER",
+        "lines": [
+            "Ein Frame fällt von oben in die Arena.",
+            "Bewege ihn mit  ← →  (Pfeiltasten oder A/D)",
+            "in die Spalte des richtigen Ziel-Ports.",
+            "",
+            "Der Ziel-Port steht auf dem Frame.",
+            "Fehler und Zeitablauf kosten ein Leben.",
+            "",
+            "Erreiche das Ziel-Score bevor alle Leben weg sind!",
+        ],
+    },
+    "route_table": {
+        "title": "ROUTE TABLE",
+        "lines": [
+            "Ein Paket mit einer Ziel-IP-Adresse erscheint.",
+            "Klicke schnell die passende Route",
+            "aus der Routing-Tabelle.",
+            "",
+            "Jede Route deckt einen IP-Adressbereich ab.",
+            "Falsche Wahl oder Zeitablauf kostet ein Leben.",
+            "",
+            "Erreiche das Ziel-Score bevor alle Leben weg sind!",
+        ],
+    },
+    "packet_inspector": {
+        "title": "PACKET INSPECTOR",
+        "lines": [
+            "Ein Paket mit Protokoll, Port und Flags erscheint.",
+            "Prüfe es anhand der angezeigten Firewall-Regeln",
+            "und entscheide: ALLOW oder DROP.",
+            "",
+            "Stimmt das Paket mit einer Regel überein,",
+            "gilt deren Verdict. Sonst gilt ALLOW.",
+            "",
+            "Falsche Entscheidung oder Zeitablauf kostet ein Leben!",
+        ],
+    },
+}
+
+def _mg_tutorial_ok_rect():
+    cx, cy = W // 2, H // 2
+    bw, bh = 200, 46
+    return pygame.Rect(cx - bw // 2, cy + 148, bw, bh)
+
+def draw_mg_tutorial(game: Game):
+    mg = game.minigame
+    if not mg or not mg.get("tutorial"): return
+    tdata = MG_TUTORIAL_TEXT.get(mg["type"])
+    if not tdata: return
+
+    tw, th = 560, 360
+    tx = W // 2 - tw // 2
+    ty = H // 2 - th // 2
+
+    draw_rect_border(screen, BORDER_A, (tx, ty, tw, th), fill=(10, 14, 22), radius=12)
+    _draw_corner_brackets(screen, pygame.Rect(tx, ty, tw, th), BORDER_A, length=16, thickness=2)
+
+    text(screen, font_big, tdata["title"], BORDER_A, W // 2, ty + 18, "midtop")
+    pygame.draw.line(screen, PANEL_HL, (tx + 24, ty + 54), (tx + tw - 24, ty + 54), 1)
+
+    ly = ty + 68
+    for line in tdata["lines"]:
+        if line:
+            text(screen, font_small, line, WHITE, W // 2, ly, "midtop")
+        ly += 22
+
+    mx, my = pygame.mouse.get_pos()
+    ok_r = _mg_tutorial_ok_rect()
+    hov = ok_r.collidepoint(mx, my)
+    draw_rect_border(screen, BORDER_A, ok_r, fill=PANEL_HL if hov else PANEL, radius=8)
+    text(screen, font_big, "LOS GEHT'S  ▶", WHITE, ok_r.centerx, ok_r.y + 9, "midtop")
+
+
 def draw_minigame(game: Game):
     mg = game.minigame
     if mg is None: return
@@ -2510,6 +2610,10 @@ def draw_minigame(game: Game):
     overlay = pygame.Surface((W, H), pygame.SRCALPHA)
     overlay.fill((0, 0, 0, 190))
     screen.blit(overlay, (0, 0))
+
+    if mg.get("tutorial"):
+        draw_mg_tutorial(game)
+        return
 
     px, py = _ff_panel_rect()
     draw_rect_border(screen, GOLD, (px, py, MG_PANEL_W, MG_PANEL_H),
@@ -2974,6 +3078,12 @@ def _draw_packet_inspector(game: Game, mg, px, py):
 def minigame_click(game: Game, mx, my) -> bool:
     mg = game.minigame
     if mg is None: return False
+    if mg.get("tutorial"):
+        if _mg_tutorial_ok_rect().collidepoint(mx, my):
+            mg["tutorial"] = False
+            if mg["type"] == "route_table":
+                mg["next_spawn"] = pygame.time.get_ticks() + 600
+        return True
     if mg["result"] is not None: return True
     if mg["type"] == "cable_patch":
         game.cp_pickup((mx, my))

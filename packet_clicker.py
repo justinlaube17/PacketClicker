@@ -1616,87 +1616,6 @@ def _bg_vignette(w, h):
                          (i, i, w - i*2, h - i*2), 1)
     return _cache_put(key, s)
 
-def _quadbezier(p0, p1, p2, steps=24):
-    pts = []
-    for i in range(steps + 1):
-        t = i / steps
-        x = (1-t)**2 * p0[0] + 2*(1-t)*t * p1[0] + t**2 * p2[0]
-        y = (1-t)**2 * p0[1] + 2*(1-t)*t * p1[1] + t**2 * p2[1]
-        pts.append((int(x), int(y)))
-    return pts
-
-def _bg_skyline(w, h):
-    key = ("skyline", w, h)
-    if key in _SURF_CACHE: return _SURF_CACHE[key]
-    s = pygame.Surface((w, h), pygame.SRCALPHA)
-
-    hy  = int(h * 0.65)
-    vpx = w // 2
-    vpy = int(h * 1.02)
-
-    # Perspektivgitter (Boden)
-    for i in range(18):
-        x = int(i / 17 * w)
-        pygame.draw.line(s, (*BORDER_A, 50), (x, hy), (vpx, vpy))
-    for j in range(8):
-        yy = hy + int((vpy - hy) * (j + 1) / 9 * (1 + j * 0.18))
-        if 0 < yy < h:
-            pygame.draw.line(s, (*BORDER_A, max(0, 50 - j * 6)), (0, yy), (w, yy))
-
-    # Skyline — (x, y, bw, bh) designed für 640h → auf h skalieren
-    sy = h / 640
-    buildings = [
-        (80, 380, 70, 200), (160, 340, 50, 240), (220, 360, 90, 220),
-        (320, 300, 60, 280), (390, 340, 110, 240), (510, 280, 70, 300),
-        (590, 320, 90, 260), (690, 250, 100, 330), (800, 310, 60, 270),
-        (870, 280, 110, 300), (990, 340, 70, 240), (1070, 300, 90, 280),
-        (1170, 340, 70, 240),
-    ]
-    for i, (bx, by_d, bw, bh_d) in enumerate(buildings):
-        by = int(by_d * sy)
-        bh = int(bh_d * sy)
-        body = pygame.Surface((bw, bh), pygame.SRCALPHA)
-        body.fill((11, 16, 32, 215))
-        s.blit(body, (bx, by))
-        pygame.draw.rect(s, (*BORDER_A, 150), (bx, by, bw, bh), 1)
-        for r in range(bh // 18):
-            for c in range(bw // 14):
-                lit = (r * 7 + c * 3 + i) % 5 == 0
-                wx, wy = bx + 4 + c * 14, by + 6 + r * 18
-                if wx + 6 <= bx + bw and wy + 10 <= by + bh:
-                    col = ((*ACCENT_2, 220) if i % 3 == 0 else (*BORDER_A, 200)) if lit else (19, 25, 42, 255)
-                    pygame.draw.rect(s, col, (wx, wy, 6, 10))
-        if i % 3 == 0:
-            ax = bx + bw // 2
-            pygame.draw.line(s, (*BORDER_A, 140), (ax, by), (ax, by - 30))
-            pygame.draw.circle(s, ACCENT_2, (ax, by - 30), 3)
-
-    # Schwebende Datenpakete (Hexagone)
-    packets = [
-        (240, 140, BORDER_A), (480, 90, ACCENT_2), (760, 160, BORDER_A),
-        (1020, 110, GREEN_C), (140, 200, BORDER_A), (900, 200, ACCENT_2),
-    ]
-    for px, py, col in packets:
-        pts = [(int(px + 12 * math.cos(math.radians(a - 90))),
-                int(py + 12 * math.sin(math.radians(a - 90)))) for a in range(0, 360, 60)]
-        pygame.draw.polygon(s, (11, 16, 32, 200), pts)
-        pygame.draw.polygon(s, (*col, 200), pts, 2)
-
-    # Verbindungsbögen zwischen Paketen (Quadratic Bezier, gestrichelt)
-    arcs = [
-        ((240, 140), (360,  40), (480, 90)),
-        ((480,  90), (620,  30), (760, 160)),
-        ((760, 160), (890,  40), (1020, 110)),
-        ((140, 200), (520, 260), (900, 200)),
-    ]
-    for p0, ctrl, p1 in arcs:
-        pts = _quadbezier(p0, ctrl, p1)
-        for j in range(0, len(pts) - 1, 2):
-            pygame.draw.line(s, (*BORDER_A, 60), pts[j], pts[j + 1])
-
-    return _cache_put(key, s)
-
-
 def draw_background(game: Game):
     # Flat-Base aus Design-bg statt Gradient (Cyberpunk wirkt mit ruhigem Hintergrund)
     screen.fill(BG)
@@ -1706,9 +1625,6 @@ def draw_background(game: Game):
 
     # 24px Liniengrid + 8px Sub-Grid (gecacht)
     screen.blit(_bg_line_grid(W, H), (0, 0))
-
-    # Skyline-Szene aus Design-Asset (gecacht)
-    screen.blit(_bg_skyline(W, H), (0, 0))
 
     # Animiertes Scan-Light bei mehr Researches
     res_count = len(game.research_done)

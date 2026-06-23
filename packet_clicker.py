@@ -300,6 +300,35 @@ RESEARCH = [
      "prereqs": ["anycast","sdwan"],"pos": (2, 3),
      "desc": "Prestige gibt 3x statt 2x",
      "effect": "prestige_bonus","val": 1.50},
+    # Tier 5 – Betrieb & Automation (zweiter Ast)
+    {"id": "monitoring","name": "Monitoring",        "col": GREEN_C,  "cost": 320,
+     "prereqs": ["anycast"],        "pos": (0, 4),
+     "desc": "+60% RFC pro Sekunde",
+     "effect": "rfc_mult",      "val": 1.60},
+    {"id": "automation","name": "Automation",        "col": CYAN_C,   "cost": 380,
+     "prereqs": ["sdwan"],          "pos": (1, 4),
+     "desc": "Offline-Ertrag x2",
+     "effect": "offline_mult",  "val": 2.00},
+    {"id": "keepalive", "name": "Keepalive",         "col": ORANGE_C, "cost": 480,
+     "prereqs": ["hyperscale"],     "pos": (2, 4),
+     "desc": "Handshake-Bonus x2",
+     "effect": "hs_mult",       "val": 2.00},
+]
+
+# ── RFC-Shop: wiederholbare, skalierende Upgrades ─────────────────────
+# Im Gegensatz zu den einmaligen Forschungsknoten beliebig oft kaufbar;
+# Kosten steigen je Stufe. Permanenter RFC-Langzeit-Sink.
+RFC_OC_STEP   = 0.05    # +5% Klick/Stufe (overclock)
+RFC_PP_STEP   = 0.05    # +5% pps/Stufe (pipelining)
+RFC_AUTO_STEP = 0.5     # +0.5 Auto-Klicks/s pro Stufe (autoresolver)
+
+RFC_SHOP = [
+    {"id": "overclock",    "name": "Overclock",     "col": GREEN_C,
+     "desc": "+5% Pakete/Klick pro Stufe",  "base": 25, "mult": 1.55},
+    {"id": "pipelining",   "name": "Pipelining",    "col": CYAN_C,
+     "desc": "+5% Pakete/s pro Stufe",      "base": 25, "mult": 1.55},
+    {"id": "autoresolver", "name": "Auto-Resolver", "col": ORANGE_C,
+     "desc": "+0.5 Auto-Klicks/s pro Stufe", "base": 40, "mult": 1.70},
 ]
 
 # ── Ereignisse ────────────────────────────────────────────────────────
@@ -318,6 +347,45 @@ EVENTS = [
      "desc": "5x Klick-Bonus!",                      "pps_m": 1.0,  "clk_m": 5.0, "negative": False},
     {"id": "zeroday", "name": "Zero-Day-Exploit!",  "col": RED_C,    "dur":  8,
      "desc": "Pakete werden aktiv gestohlen!",        "pps_m":-0.05, "clk_m": 1.0, "negative": True},
+]
+
+# ── Event-Entscheidungen ──────────────────────────────────────────────
+# Manche Ereignisse stellen dich vor eine Wahl mit Trade-off, statt einfach
+# zu passieren. Jede Option hat ein "outcome": optionale RFC-/Paket-Kosten
+# und ein resultierendes Event (oder keins).
+CHOICE_EVENT_PROB = 0.5      # Anteil der Ereignisse, die zur Entscheidung werden
+
+CHOICE_EVENTS = [
+    {"id": "ddos_choice", "name": "DDoS-Angriff erkannt", "col": RED_C,
+     "desc": "Eine Paketflut trifft deine Edge. Wie reagierst du?",
+     "options": [
+        {"label": "Scrubbing-Center", "desc": "Kostet 8 RFC, blockt den Angriff komplett.",
+         "outcome": {"rfc_cost": 8.0}},
+        {"label": "Aushalten", "desc": "Pakete/s 25% fuer 15s.",
+         "outcome": {"event": {"id": "ddos", "name": "DDoS-Angriff!", "col": RED_C, "dur": 15,
+                               "desc": "Pakete/s auf 25% reduziert.",
+                               "pps_m": 0.25, "clk_m": 1.0, "negative": True}}},
+     ]},
+    {"id": "peer_choice", "name": "Peering-Angebot", "col": CYAN_C,
+     "desc": "Ein Carrier bietet einen fetten Uplink — gegen Vorauszahlung.",
+     "options": [
+        {"label": "Deal annehmen", "desc": "Kostet 20% Pakete, dann 3x Pakete/s fuer 15s.",
+         "outcome": {"cost_pct": 0.20,
+                     "event": {"id": "peering", "name": "Peering-Deal!", "col": CYAN_C, "dur": 15,
+                               "desc": "Neuer Uplink — 3x Pakete/s!",
+                               "pps_m": 3.0, "clk_m": 1.0, "negative": False}}},
+        {"label": "Ablehnen", "desc": "Nichts passiert.", "outcome": {}},
+     ]},
+    {"id": "patch_choice", "name": "Sicherheits-Patch verfuegbar", "col": ORANGE_C,
+     "desc": "Ein kritischer Patch ist da. Sofort einspielen oder spaeter?",
+     "options": [
+        {"label": "Wartungsfenster", "desc": "Auto-Routing pausiert fuer 8s.",
+         "outcome": {"event": {"id": "maint", "name": "Wartungsfenster", "col": ORANGE_C, "dur": 8,
+                               "desc": "Auto-Routing pausiert.",
+                               "pps_m": 0.0, "clk_m": 1.0, "negative": True}}},
+        {"label": "Verschieben", "desc": "Riskant: 8% Chance auf Zero-Day spaeter (jetzt nichts).",
+         "outcome": {}},
+     ]},
 ]
 
 # ── Offline-Progress ──────────────────────────────────────────────────
@@ -796,6 +864,7 @@ class Game:
         self.research_done  = set()
         self.event          = None
         self.event_until    = 0
+        self.event_choice   = None     # offene Entscheidung (Dict) oder None
         self.next_event     = pygame.time.get_ticks() + 45_000
         self.shop_scroll    = 0
         self.res_scroll     = 0
@@ -852,6 +921,10 @@ class Game:
         self.offline_rfc    = 0.0
         self.offline_secs   = 0
 
+        # RFC-Shop: wiederholbare Upgrades (id -> Stufe), ueberlebt Prestige
+        self.rfc_upgrades   = {}
+        self.show_rfc_shop  = False
+
         # Stats/Achievement-Screen: Ruecksprungziel merken
         self.prev_state     = "menu"
 
@@ -869,10 +942,15 @@ class Game:
     # ── Forschungs-Effekte ───────────────────────────────────────────
     def _compute_fx(self):
         fx = {"click_mult":1.0,"pps_mult":1.0,"all_mult":1.0,
-              "neg_dur":1.0,"neg_eff":1.0,"cdn_mult":1.0,"prestige_bonus":1.0}
+              "neg_dur":1.0,"neg_eff":1.0,"cdn_mult":1.0,"prestige_bonus":1.0,
+              # Tier-5-Ast "Betrieb & Automation"
+              "rfc_mult":1.0,"offline_mult":1.0,"hs_mult":1.0}
         for r in RESEARCH:
             if r["id"] in self.research_done:
                 fx[r["effect"]] *= r["val"]
+        # RFC-Shop: wiederholbare Multiplikator-Upgrades
+        fx["click_mult"] *= (1 + RFC_OC_STEP * self.rfc_upgrades.get("overclock", 0))
+        fx["pps_mult"]   *= (1 + RFC_PP_STEP * self.rfc_upgrades.get("pipelining", 0))
         return fx
 
     @property
@@ -910,7 +988,7 @@ class Game:
         if not self.rfc_unlocked:
             return 0.0
         unique = sum(1 for u in UPGRADES if self.owned.get(u["id"],0) > 0)
-        return 0.08 * unique + 0.02 * len(self.research_done)
+        return (0.08 * unique + 0.02 * len(self.research_done)) * self.fx["rfc_mult"]
 
     # ── Pakete/s ─────────────────────────────────────────────────────
     def raw_pps(self):
@@ -1082,7 +1160,7 @@ class Game:
         mult   = min(HS_COMBO_CAP, 1.0 + HS_COMBO_STEP * (self.hs_combo - 1))
         if self.hs_perfects == 3:
             mult *= 1.5    # alle drei Phasen im Sweet-Spot
-        bonus  = base * mult * self.fx["all_mult"]
+        bonus  = base * mult * self.fx["all_mult"] * self.fx["hs_mult"]
         self.packets       += bonus
         self.total_packets += bonus
         tag = "  3x PERFECT" if self.hs_perfects == 3 else (f"  x{self.hs_combo} COMBO" if self.hs_combo > 1 else "")
@@ -1636,6 +1714,22 @@ class Game:
                                         f"Erforscht: {r['name']}", RFC_COL))
         return True
 
+    # ── RFC-Shop (wiederholbare Upgrades) ────────────────────────────
+    def rfc_upgrade_cost(self, uid):
+        item = next(s for s in RFC_SHOP if s["id"] == uid)
+        level = self.rfc_upgrades.get(uid, 0)
+        return int(item["base"] * (item["mult"] ** level))
+
+    def buy_rfc_upgrade(self, uid):
+        cost = self.rfc_upgrade_cost(uid)
+        if self.rfc_points < cost:
+            return False
+        self.rfc_points -= cost
+        self.rfc_upgrades[uid] = self.rfc_upgrades.get(uid, 0) + 1
+        self._invalidate_fx()
+        play_sfx('buy')
+        return True
+
     def do_prestige(self):
         bonus = self.fx["prestige_bonus"]
         self.prestige      += 1
@@ -1644,6 +1738,7 @@ class Game:
         self.total_packets  = 0.0
         self.owned          = {}
         self.event          = None
+        self.event_choice   = None
         self.next_event     = pygame.time.get_ticks() + 45_000
         self.hs_state       = None
         self.hs_combo       = 0
@@ -1659,6 +1754,34 @@ class Game:
         play_sfx('prestige')
         self.save()
 
+    # ── Event-Entscheidung anwenden ──────────────────────────────────
+    def resolve_event_choice(self, opt_idx):
+        ec = self.event_choice
+        if ec is None: return
+        try:
+            outcome = ec["options"][opt_idx]["outcome"]
+        except (IndexError, KeyError):
+            return
+        now = pygame.time.get_ticks()
+        if outcome.get("rfc_cost"):
+            self.rfc_points = max(0.0, self.rfc_points - outcome["rfc_cost"])
+        if outcome.get("cost_pct"):
+            self.packets *= (1.0 - outcome["cost_pct"])
+        ev = outcome.get("event")
+        if ev:
+            self.event = dict(ev)
+            self.events_seen += 1
+            dur = ev["dur"]
+            if ev.get("negative") and dur > 0:
+                dur = max(1, int(dur * self.fx["neg_dur"]))
+                play_sfx('event_neg')
+            else:
+                play_sfx('event_pos')
+            self.event_until = now + dur * 1000
+        else:
+            play_sfx('click')
+        self.event_choice = None
+
     # ── Update ───────────────────────────────────────────────────────
     def update(self, dt):
         if self.minigame is not None:
@@ -1671,6 +1794,12 @@ class Game:
         self.packets       -= self.pps_drain * dt / 1000
         self.packets        = max(0.0, self.packets)
         self.rfc_points    += self.rfc_rate * dt / 1000
+        # Auto-Resolver (RFC-Shop): passive Klicks
+        auto = self.rfc_upgrades.get("autoresolver", 0) * RFC_AUTO_STEP
+        if auto > 0:
+            auto_gain = auto * self.click_power * dt / 1000
+            self.packets       += auto_gain
+            self.total_packets += auto_gain
         self.click_pulse    = max(0.0, self.click_pulse - dt * 0.004)
         for sw in self.click_shockwaves: sw["age"] += dt
         self.click_shockwaves = [s for s in self.click_shockwaves if s["age"] < s["ttl"]]
@@ -1691,18 +1820,24 @@ class Game:
             self.event = None
         self._update_handshake(now)
 
-        if self.event is None and now > self.next_event and self.total_packets > 50:
-            ev = random.choice(EVENTS)
-            self.event = dict(ev)
-            self.events_seen += 1
-            dur = ev["dur"]
-            if ev.get("negative") and dur > 0:
-                dur = max(1, int(dur * self.fx["neg_dur"]))
-                play_sfx('event_neg')
-            else:
+        if (self.event is None and self.event_choice is None
+                and now > self.next_event and self.total_packets > 50):
+            self.next_event = now + random.randint(25_000, 80_000)
+            if random.random() < CHOICE_EVENT_PROB:
+                # Entscheidung praesentieren — Event erst nach Wahl aktiv
+                self.event_choice = dict(random.choice(CHOICE_EVENTS))
                 play_sfx('event_pos')
-            self.event_until = now + dur * 1000
-            self.next_event  = now + random.randint(25_000, 80_000)
+            else:
+                ev = random.choice(EVENTS)
+                self.event = dict(ev)
+                self.events_seen += 1
+                dur = ev["dur"]
+                if ev.get("negative") and dur > 0:
+                    dur = max(1, int(dur * self.fx["neg_dur"]))
+                    play_sfx('event_neg')
+                else:
+                    play_sfx('event_pos')
+                self.event_until = now + dur * 1000
 
         # Achievements pruefen + Toasts altern lassen
         self._sync_achievements()
@@ -1728,6 +1863,7 @@ class Game:
                            "prestige_mult": self.prestige_mult,
                            "rfc": self.rfc_points,
                            "research": list(self.research_done),
+                           "rfc_upgrades": self.rfc_upgrades,
                            "unlocked": list(self.unlocked),
                            "rfc_unlocked": self.rfc_unlocked,
                            "show_rfc_intro": self.show_rfc_intro,
@@ -1763,6 +1899,8 @@ class Game:
             self.prestige_mult  = d.get("prestige_mult", 1.0)
             self.rfc_points     = d.get("rfc", 0.0)
             self.research_done  = set(d.get("research", []))
+            self.rfc_upgrades   = d.get("rfc_upgrades", {})
+            self._invalidate_fx()   # fx haengt von rfc_upgrades ab
             self.unlocked       = set(d.get("unlocked", ["hub"]))
             self.rfc_unlocked   = d.get("rfc_unlocked", False)
             self.show_rfc_intro      = d.get("show_rfc_intro", False)
@@ -1793,7 +1931,7 @@ class Game:
                 if elapsed >= OFFLINE_MIN_SECS:
                     capped = min(elapsed, OFFLINE_CAP_SECS)
                     rate     = self.raw_pps() * self.prestige_mult   # ohne Event
-                    gain     = rate * capped
+                    gain     = rate * capped * self.fx["offline_mult"]
                     rfc_gain = self.rfc_rate * capped
                     if gain >= 1 or rfc_gain >= 0.01:
                         self.packets       += gain
@@ -2556,6 +2694,15 @@ def draw_research(game: Game):
     rfc_str = f"RFC-Punkte: {game.rfc_points:.1f}  (+{game.rfc_rate:.2f}/s)"
     text(screen, font_med, rfc_str, RFC_COL, LEFT_W + (W-LEFT_W)//2, RES_TOP+2, "midtop")
 
+    # RFC-Shop-Button (oben rechts)
+    mxb, myb = pygame.mouse.get_pos()
+    sbtn = _rfc_shop_btn_rect()
+    hovs = sbtn.collidepoint(mxb, myb)
+    draw_rect_border(screen, RFC_COL if hovs else BORDER, sbtn,
+                     fill=PANEL_HL if hovs else PANEL, radius=8)
+    text(screen, font_small, "RFC-SHOP", WHITE if hovs else RFC_COL,
+         sbtn.centerx, sbtn.centery, "center")
+
     clip = pygame.Rect(LEFT_W, RES_TOP+26, W-LEFT_W, H-RES_TOP-26)
     screen.set_clip(clip)
 
@@ -2652,6 +2799,10 @@ def shop_click(game: Game, mx, my):
 
 
 def research_click(game: Game, mx, my):
+    if _rfc_shop_btn_rect().collidepoint(mx, my):
+        game.show_rfc_shop = True
+        play_sfx('click')
+        return
     for r in RESEARCH:
         rect = _node_rect(r["pos"])
         if rect.collidepoint(mx, my):
@@ -4086,6 +4237,156 @@ def stats_click(game: Game, mx, my) -> bool:
     return False
 
 
+# ── RFC-Shop (wiederholbare Upgrades) ─────────────────────────────────
+
+RFC_SHOP_W, RFC_SHOP_H = 620, 420
+
+def _rfc_shop_btn_rect():
+    """Button im Forschungs-Tab oben rechts, oeffnet den RFC-Shop."""
+    return pygame.Rect(W - 168, 40, 150, 28)
+
+def _rfc_shop_panel():
+    px = W // 2 - RFC_SHOP_W // 2
+    py = H // 2 - RFC_SHOP_H // 2
+    return px, py
+
+def _rfc_shop_row_rects():
+    """(buy_rect) pro Upgrade-Zeile + close_rect."""
+    px, py = _rfc_shop_panel()
+    rows = []
+    row_y = py + 104
+    for _ in RFC_SHOP:
+        buy = pygame.Rect(px + RFC_SHOP_W - 150, row_y + 14, 120, 46)
+        rows.append(buy)
+        row_y += 86
+    close = pygame.Rect(px + RFC_SHOP_W // 2 - 90, py + RFC_SHOP_H - 56, 180, 44)
+    return rows, close
+
+
+def draw_rfc_shop(game: Game):
+    if not game.show_rfc_shop: return
+    overlay = pygame.Surface((W, H), pygame.SRCALPHA)
+    overlay.fill((0, 0, 0, 200))
+    screen.blit(overlay, (0, 0))
+
+    px, py = _rfc_shop_panel()
+    draw_rect_border(screen, RFC_COL, (px, py, RFC_SHOP_W, RFC_SHOP_H),
+                     fill=(15, 20, 28), radius=12)
+    text(screen, font_xl, "RFC-SHOP", RFC_COL, px + RFC_SHOP_W // 2, py + 16, "midtop")
+    text(screen, font_small, "Wiederholbare Upgrades — Kosten steigen pro Stufe",
+         DIM, px + RFC_SHOP_W // 2, py + 60, "midtop")
+    text(screen, font_med, f"RFC {game.rfc_points:.1f}", WHITE,
+         px + RFC_SHOP_W - 24, py + 18, "topright")
+
+    mx, my = pygame.mouse.get_pos()
+    rows, close = _rfc_shop_row_rects()
+    row_y = py + 104
+    for item, buy in zip(RFC_SHOP, rows):
+        lvl  = game.rfc_upgrades.get(item["id"], 0)
+        cost = game.rfc_upgrade_cost(item["id"])
+        can  = game.rfc_points >= cost
+        card = pygame.Rect(px + 24, row_y, RFC_SHOP_W - 48, 74)
+        draw_rect_border(screen, item["col"] if can else BORDER, card,
+                         fill=PANEL_HL if can else PANEL, radius=8)
+        text(screen, font_med, item["name"], WHITE, card.x + 14, card.y + 8)
+        text(screen, font_tiny, item["desc"], DIM, card.x + 14, card.y + 36)
+        text(screen, font_small, f"Stufe {lvl}", item["col"], card.x + 14, card.y + 52)
+
+        hov = buy.collidepoint(mx, my)
+        if can and hov:
+            draw_glow_border(screen, item["col"], buy, radius=8, intensity=80)
+        draw_rect_border(screen, item["col"] if can else BORDER, buy,
+                         fill=(14, 40, 44) if can else PANEL, radius=8)
+        text(screen, font_small, f"{cost} RFC", WHITE if can else DIM,
+             buy.centerx, buy.centery - 8, "center")
+        text(screen, font_tiny, "KAUFEN" if can else "zu wenig",
+             item["col"] if can else DIM, buy.centerx, buy.centery + 10, "center")
+        row_y += 86
+
+    hovc = close.collidepoint(mx, my)
+    draw_rect_border(screen, WHITE if hovc else DIM, close,
+                     fill=PANEL_HL if hovc else PANEL, radius=8)
+    text(screen, font_big, "SCHLIESSEN", WHITE, close.centerx, close.centery, "center")
+
+
+def rfc_shop_click(game: Game, mx, my) -> bool:
+    if not game.show_rfc_shop: return False
+    rows, close = _rfc_shop_row_rects()
+    if close.collidepoint(mx, my):
+        game.show_rfc_shop = False
+        play_sfx("click")
+        return True
+    for item, buy in zip(RFC_SHOP, rows):
+        if buy.collidepoint(mx, my):
+            if not game.buy_rfc_upgrade(item["id"]):
+                play_sfx("error")
+            break
+    return True   # Modal: alle Klicks abfangen
+
+
+# ── Event-Entscheidung ────────────────────────────────────────────────
+
+EVC_W, EVC_H = 640, 300
+
+def _event_choice_rects():
+    px = W // 2 - EVC_W // 2
+    py = H // 2 - EVC_H // 2
+    ow = (EVC_W - 60) // 2
+    oh = 110
+    oy = py + EVC_H - oh - 24
+    optA = pygame.Rect(px + 20, oy, ow, oh)
+    optB = pygame.Rect(px + EVC_W - 20 - ow, oy, ow, oh)
+    return px, py, [optA, optB]
+
+
+def draw_event_choice(game: Game):
+    ec = game.event_choice
+    if ec is None: return
+    overlay = pygame.Surface((W, H), pygame.SRCALPHA)
+    overlay.fill((0, 0, 0, 200))
+    screen.blit(overlay, (0, 0))
+
+    px, py, opt_rects = _event_choice_rects()
+    col = ec.get("col", BORDER_A)
+    draw_rect_border(screen, col, (px, py, EVC_W, EVC_H), fill=(15, 20, 28), radius=12)
+    text(screen, font_xl, ec["name"], col, px + EVC_W // 2, py + 18, "midtop")
+    text(screen, font_small, ec["desc"], DIM, px + EVC_W // 2, py + 66, "midtop")
+    text(screen, font_tiny, "Triff eine Entscheidung — Taste 1 / 2 oder Klick",
+         INK_MUTE, px + EVC_W // 2, py + 92, "midtop")
+
+    mx, my = pygame.mouse.get_pos()
+    for i, (opt, r) in enumerate(zip(ec["options"], opt_rects)):
+        hov = r.collidepoint(mx, my)
+        if hov:
+            draw_glow_border(screen, col, r, radius=8, intensity=70)
+        draw_rect_border(screen, col if hov else BORDER, r,
+                         fill=PANEL_HL if hov else PANEL, radius=8)
+        text(screen, font_tiny, f"[{i+1}]", DIM, r.x + 10, r.y + 8)
+        text(screen, font_med, opt["label"], WHITE, r.centerx, r.y + 26, "midtop")
+        # Beschreibung an Wortgrenze auf 2 Zeilen umbrechen
+        line1, line2 = [], []
+        for w in opt["desc"].split():
+            if not line2 and len(" ".join(line1 + [w])) > 26:
+                line2.append(w)
+            elif line2:
+                line2.append(w)
+            else:
+                line1.append(w)
+        text(screen, font_tiny, " ".join(line1), DIM, r.centerx, r.y + 58, "midtop")
+        if line2:
+            text(screen, font_tiny, " ".join(line2), DIM, r.centerx, r.y + 76, "midtop")
+
+
+def event_choice_click(game: Game, mx, my) -> bool:
+    if game.event_choice is None: return False
+    _, _, opt_rects = _event_choice_rects()
+    for i, r in enumerate(opt_rects):
+        if r.collidepoint(mx, my):
+            game.resolve_event_choice(i)
+            break
+    return True   # Modal: alle Klicks abfangen
+
+
 # ── Main Menu ─────────────────────────────────────────────────────────
 
 def draw_main_menu(game: Game):
@@ -4518,6 +4819,8 @@ def main():
                         elif game.show_rfc_intro:
                             game.show_rfc_intro = False
                             game.save()
+                        elif game.show_rfc_shop:
+                            game.show_rfc_shop = False
                         elif game.minigame is not None:
                             game.abort_minigame()
                         else:
@@ -4557,6 +4860,14 @@ def main():
                     elif event.key == pygame.K_4:
                         game.mg_option(3)
 
+                # Event-Entscheidung per Taste 1 / 2
+                if (game.state == "playing" and game.minigame is None
+                        and game.event_choice is not None):
+                    if event.key == pygame.K_1:
+                        game.resolve_event_choice(0)
+                    elif event.key == pygame.K_2:
+                        game.resolve_event_choice(1)
+
             if event.type == pygame.MOUSEWHEEL and game.state == "playing":
                 if game.tab == "upgrades":
                     game.shop_scroll = min(max_scroll_shop, max(0, game.shop_scroll - event.y * 40))
@@ -4590,6 +4901,14 @@ def main():
 
                     # Offline-Progress-Popup blockt alle anderen Klicks
                     if offline_click(game, mx, my):
+                        continue
+
+                    # RFC-Shop-Modal blockt alle anderen Klicks
+                    if rfc_shop_click(game, mx, my):
+                        continue
+
+                    # Event-Entscheidung blockt alle anderen Klicks
+                    if event_choice_click(game, mx, my):
                         continue
 
                     # Einführungs-Popup blockt alle anderen Klicks
@@ -4684,6 +5003,8 @@ def main():
             draw_rfc_intro(game)
             draw_intro(game)
             draw_offline(game)
+            draw_rfc_shop(game)
+            draw_event_choice(game)
 
             draw_debug_menu(game)
         else:

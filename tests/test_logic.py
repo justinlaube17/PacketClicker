@@ -38,6 +38,36 @@ def test_higher_tiers_not_challenge_gated(game):
         assert game.needs_challenge(uid) is False
 
 
+# ── Zweiter Forschungsast (Tier 5: Betrieb & Automation) ──────────────
+def test_tier5_research_nodes_exist():
+    by_id = {r["id"]: r for r in pc.RESEARCH}
+    assert {"monitoring", "automation", "keepalive"} <= set(by_id)
+    assert by_id["monitoring"]["prereqs"] == ["anycast"]
+    assert by_id["automation"]["prereqs"] == ["sdwan"]
+    assert by_id["keepalive"]["prereqs"] == ["hyperscale"]
+    assert by_id["monitoring"]["pos"][1] == 4   # Tier-5-Reihe
+
+
+def test_monitoring_boosts_rfc_rate(game):
+    game.rfc_unlocked = True
+    game.owned = {"hub": 1}                 # 1 Tier
+    game.research_done = {"monitoring"}     # 1 Forschung, rfc_mult 1.6
+    game._invalidate_fx()
+    assert game.rfc_rate == pytest.approx((0.08 + 0.02) * 1.60)
+
+
+def test_keepalive_sets_hs_mult(game):
+    game.research_done = {"keepalive"}
+    game._invalidate_fx()
+    assert game.fx["hs_mult"] == pytest.approx(2.0)
+
+
+def test_automation_sets_offline_mult(game):
+    game.research_done = {"automation"}
+    game._invalidate_fx()
+    assert game.fx["offline_mult"] == pytest.approx(2.0)
+
+
 # ── Pakete/s ──────────────────────────────────────────────────────────
 def test_raw_pps_sums_owned(game):
     game.owned = {"hub": 2}          # hub = 0.5 pps

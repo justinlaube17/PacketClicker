@@ -47,6 +47,14 @@ def test_no_offline_without_last_played(tmp_path, monkeypatch):
     assert g.show_offline is False
 
 
+def test_offline_automation_research_doubles_gain(tmp_path, monkeypatch):
+    monkeypatch.setattr(pc, "SAVE_PATH", str(tmp_path / "s.json"))
+    _write_save(pc.SAVE_PATH, research=["automation"],   # offline_mult 2.0
+                last_played=time.time() - 3600)
+    g = pc.Game()
+    assert g.offline_gain == pytest.approx(5.0 * 3600 * 2, rel=0.02)
+
+
 # ── Achievements ──────────────────────────────────────────────────────
 def test_sync_unlocks_and_toasts(game):
     game.total_clicks = 1

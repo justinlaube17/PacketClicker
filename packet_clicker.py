@@ -4,7 +4,7 @@ Klicke Pakete, forsche, bau dein Autonomes System aus!
 ESC = Beenden  |  Scrollrad = scrollen  |  Tab-Klick = Ansicht wechseln
 """
 
-import pygame, sys, math, random, json, os, array
+import pygame, sys, math, random, json, os, array, time
 try:
     import cv2
     import numpy as np
@@ -166,6 +166,36 @@ font_display  = _font(64, bold=True, display=True)   # Hero-Title mit Outline
 
 SAVE_PATH = _userdata("packet_save.json")
 
+# ── Save-Format-Versionierung ─────────────────────────────────────────
+# Bei jeder schema-relevanten Aenderung hochzaehlen und in migrate_save()
+# einen `if v < N:`-Block ergaenzen, der alte Saves auf das neue Format hebt.
+SAVE_VERSION = 1
+
+def migrate_save(d: dict) -> dict:
+    """Hebt ein rohes Save-Dict auf SAVE_VERSION an (in-place) und gibt es zurueck.
+
+    Alte Saves ohne "version"-Feld gelten als Version 0. Jeder Block wandelt
+    genau eine Version weiter, damit auch mehrere Spruenge sauber durchlaufen.
+    """
+    v = d.get("version", 0)
+    if v < 1:
+        # v0 → v1: erste versionierte Fassung. Frueher implizit per
+        # Sonderfaellen in load() behandelt — jetzt explizit hier.
+        # Bereits gekaufte Tiers gelten als freigeschaltet (das Unlock-System
+        # kam erst nach den ersten Saves dazu).
+        unlocked = set(d.get("unlocked", ["hub"]))
+        for uid, cnt in d.get("owned", {}).items():
+            if cnt > 0:
+                unlocked.add(uid)
+        d["unlocked"] = list(unlocked)
+        # Wer eine Firewall besitzt, hat die RFC-Forschung bereits gesehen.
+        if d.get("owned", {}).get("firewall", 0) > 0:
+            d["rfc_unlocked"] = True
+            d.setdefault("show_rfc_intro", False)
+        v = 1
+    d["version"] = SAVE_VERSION
+    return d
+
 # ── Upgrade-Definitionen ──────────────────────────────────────────────
 UPGRADES = [
     {"id": "hub",        "name": "Hub",              "abbr": "HUB", "col": DIM,
@@ -273,6 +303,57 @@ EVENTS = [
      "desc": "5x Klick-Bonus!",                      "pps_m": 1.0,  "clk_m": 5.0, "negative": False},
     {"id": "zeroday", "name": "Zero-Day-Exploit!",  "col": RED_C,    "dur":  8,
      "desc": "Pakete werden aktiv gestohlen!",        "pps_m":-0.05, "clk_m": 1.0, "negative": True},
+]
+
+# ── Offline-Progress ──────────────────────────────────────────────────
+OFFLINE_MIN_SECS = 60          # erst ab 1 min Abwesenheit anrechnen
+OFFLINE_CAP_SECS = 8 * 3600    # max. 8 h werden gutgeschrieben
+
+# ── Achievement-Toasts ────────────────────────────────────────────────
+ACH_TOAST_MS = 3600            # Anzeigedauer einer Benachrichtigung (ms)
+
+# ── Achievements ──────────────────────────────────────────────────────
+# check(g) -> bool. Einmal erreicht, bleiben sie dauerhaft (ueberleben Prestige).
+ACHIEVEMENTS = [
+    {"id": "first_click",  "name": "Erstes Paket",      "col": GREEN_C,
+     "desc": "Generiere dein erstes Paket.",
+     "check": lambda g: g.total_clicks >= 1},
+    {"id": "click_500",    "name": "Klick-Maschine",    "col": GREEN_C,
+     "desc": "500 manuelle Klicks.",
+     "check": lambda g: g.total_clicks >= 500},
+    {"id": "first_buy",    "name": "Hardware-Kauf",     "col": BLUE_C,
+     "desc": "Kaufe dein erstes Upgrade.",
+     "check": lambda g: any(c > 0 for c in g.owned.values())},
+    {"id": "pkt_1k",       "name": "Kilo-Traffic",      "col": CYAN_C,
+     "desc": "1.000 Pakete insgesamt.",
+     "check": lambda g: g.total_packets >= 1_000},
+    {"id": "pkt_1m",       "name": "Mega-Traffic",      "col": CYAN_C,
+     "desc": "1 Mio. Pakete insgesamt.",
+     "check": lambda g: g.total_packets >= 1_000_000},
+    {"id": "pkt_1b",       "name": "Giga-Traffic",      "col": GOLD,
+     "desc": "1 Mrd. Pakete insgesamt.",
+     "check": lambda g: g.total_packets >= 1_000_000_000},
+    {"id": "all_tiers",    "name": "Full Stack",        "col": PURPLE_C,
+     "desc": "Besitze jedes Upgrade-Tier mindestens einmal.",
+     "check": lambda g: all(g.owned.get(u["id"], 0) > 0 for u in UPGRADES)},
+    {"id": "researcher",   "name": "RFC-Leser",         "col": RFC_COL,
+     "desc": "Schliesse deine erste Forschung ab.",
+     "check": lambda g: len(g.research_done) >= 1},
+    {"id": "full_research","name": "Standardisiert",    "col": RFC_COL,
+     "desc": "Schliesse alle Forschungen ab.",
+     "check": lambda g: len(g.research_done) >= len(RESEARCH)},
+    {"id": "combo_5",      "name": "Handshake-Held",    "col": GOLD,
+     "desc": "Erreiche eine Handshake-Combo von 5.",
+     "check": lambda g: g.best_combo >= 5},
+    {"id": "mg_win",       "name": "Challenge gemeistert","col": ORANGE_C,
+     "desc": "Gewinne ein Tier-Unlock-Minispiel.",
+     "check": lambda g: g.minigames_won >= 1},
+    {"id": "prestige_1",   "name": "Aufgestiegen",      "col": GOLD,
+     "desc": "Fuehre dein erstes Prestige durch.",
+     "check": lambda g: g.prestige >= 1},
+    {"id": "prestige_5",   "name": "Serien-Aufsteiger", "col": GOLD,
+     "desc": "Erreiche Prestige-Stufe 5.",
+     "check": lambda g: g.prestige >= 5},
 ]
 
 # ── TCP-Handshake (Wire + Paket) ──────────────────────────────────────
@@ -715,14 +796,35 @@ class Game:
 
         self.confirm_prestige = False
         self._fx_cache      = None         # cached research effects
-        
-        self.state          = "menu"       # "menu" | "playing" | "settings"
+
+        # Statistiken (persistent, ueberleben Prestige)
+        self.total_clicks   = 0
+        self.minigames_won  = 0
+        self.hs_success     = 0            # erfolgreiche Handshakes
+        self.best_combo     = 0            # hoechste je erreichte HS-Combo
+        self.events_seen    = 0            # ausgeloeste Netzwerk-Events
+        self.play_secs      = 0.0          # aktive Spielzeit in Sekunden
+
+        # Achievements + Toast-Benachrichtigungen
+        self.achievements   = set()        # ids erreichter Achievements
+        self.ach_toasts     = []           # [{"name":str,"col":rgb,"born":ms}]
+
+        # Offline-Progress (beim Laden befuellt)
+        self.show_offline   = False
+        self.offline_gain   = 0.0
+        self.offline_rfc    = 0.0
+        self.offline_secs   = 0
+
+        # Stats/Achievement-Screen: Ruecksprungziel merken
+        self.prev_state     = "menu"
+
+        self.state          = "menu"       # "menu" | "playing" | "settings" | "stats"
         self.music_muted    = False
         self.sfx_muted      = False
         self.res_idx        = 0
         self.fps_idx        = 1
         self.fullscreen     = False
-        
+
         self.load()
         set_bgm_muted(self.music_muted)
         apply_display_settings(self)
@@ -744,6 +846,26 @@ class Game:
 
     def _invalidate_fx(self):
         self._fx_cache = None
+
+    # ── Achievements ─────────────────────────────────────────────────
+    def _sync_achievements(self, silent=False):
+        """Prueft alle Achievements. Neu erreichte werden gemerkt; bei
+        silent=False zusaetzlich als Toast eingeblendet und vertont.
+        silent=True nutzt das Laden, damit Altspielstaende nicht eine
+        Flut von Benachrichtigungen ausloesen."""
+        for a in ACHIEVEMENTS:
+            if a["id"] in self.achievements:
+                continue
+            try:
+                hit = a["check"](self)
+            except Exception:
+                hit = False
+            if hit:
+                self.achievements.add(a["id"])
+                if not silent:
+                    self.ach_toasts.append({"name": a["name"], "col": a["col"],
+                                            "born": pygame.time.get_ticks()})
+                    play_sfx('research')
 
     # ── RFC-Generierung ──────────────────────────────────────────────
     @property
@@ -821,6 +943,7 @@ class Game:
     # ── Aktionen ─────────────────────────────────────────────────────
     def click(self, mx, my):
         earned = self.click_power
+        self.total_clicks  += 1
         self.packets       += earned
         self.total_packets += earned
         self.click_pulse    = 1.0
@@ -914,6 +1037,8 @@ class Game:
 
     def _handshake_success(self, mx, my):
         self.hs_combo += 1
+        self.hs_success += 1
+        self.best_combo = max(self.best_combo, self.hs_combo)
         cx, cy = LEFT_W // 2, 335
         base   = max(float(HS_BONUS_MIN), self.pps * HS_BONUS_SECS)
         # Combo (sequenzuebergreifend) + Perfect-Bonus (innerhalb dieser Sequenz)
@@ -1309,6 +1434,7 @@ class Game:
         target = mg["target"]
         won    = (mg["result"] == "won")
         if won:
+            self.minigames_won += 1
             self.unlocked.add(target)
             self.save()
         else:
@@ -1370,6 +1496,7 @@ class Game:
             self._update_minigame(dt)
             return
         now = pygame.time.get_ticks()
+        self.play_secs     += dt / 1000
         self.packets       += self.pps * dt / 1000
         self.total_packets += max(0, self.pps) * dt / 1000
         self.packets       -= self.pps_drain * dt / 1000
@@ -1398,6 +1525,7 @@ class Game:
         if self.event is None and now > self.next_event and self.total_packets > 50:
             ev = random.choice(EVENTS)
             self.event = dict(ev)
+            self.events_seen += 1
             dur = ev["dur"]
             if ev.get("negative") and dur > 0:
                 dur = max(1, int(dur * self.fx["neg_dur"]))
@@ -1406,6 +1534,13 @@ class Game:
                 play_sfx('event_pos')
             self.event_until = now + dur * 1000
             self.next_event  = now + random.randint(25_000, 80_000)
+
+        # Achievements pruefen + Toasts altern lassen
+        self._sync_achievements()
+        if self.ach_toasts:
+            self.ach_toasts = [t for t in self.ach_toasts
+                               if now - t["born"] < ACH_TOAST_MS]
+
         if now - self._last_save > 30_000:
             self.save(); self._last_save = now
 
@@ -1418,7 +1553,8 @@ class Game:
     def save(self):
         try:
             with open(SAVE_PATH, "w") as f:
-                json.dump({"packets": self.packets, "total": self.total_packets,
+                json.dump({"version": SAVE_VERSION,
+                           "packets": self.packets, "total": self.total_packets,
                            "owned": self.owned, "prestige": self.prestige,
                            "prestige_mult": self.prestige_mult,
                            "rfc": self.rfc_points,
@@ -1432,7 +1568,17 @@ class Game:
                            "sfx_muted": self.sfx_muted,
                            "res_idx": self.res_idx,
                            "fps_idx": self.fps_idx,
-                           "fullscreen": self.fullscreen}, f)
+                           "fullscreen": self.fullscreen,
+                           # Statistiken + Achievements
+                           "total_clicks": self.total_clicks,
+                           "minigames_won": self.minigames_won,
+                           "hs_success": self.hs_success,
+                           "best_combo": self.best_combo,
+                           "events_seen": self.events_seen,
+                           "play_secs": self.play_secs,
+                           "achievements": list(self.achievements),
+                           # Wanduhr-Zeitstempel fuer Offline-Progress
+                           "last_played": time.time()}, f)
         except Exception: pass
 
     def load(self):
@@ -1440,6 +1586,7 @@ class Game:
             with open(SAVE_PATH) as f:
                 d = json.load(f)
             if "packets" not in d: return
+            d = migrate_save(d)
             self.packets        = d.get("packets", 0)
             self.total_packets  = d.get("total", 0)
             self.owned          = d.get("owned", {})
@@ -1448,24 +1595,45 @@ class Game:
             self.rfc_points     = d.get("rfc", 0.0)
             self.research_done  = set(d.get("research", []))
             self.unlocked       = set(d.get("unlocked", ["hub"]))
-            # Rueckwaertskompatibilitaet: bereits gekaufte Tiers gelten als freigeschaltet
-            for uid, cnt in self.owned.items():
-                if cnt > 0:
-                    self.unlocked.add(uid)
             self.rfc_unlocked   = d.get("rfc_unlocked", False)
             self.show_rfc_intro      = d.get("show_rfc_intro", False)
             self.show_intro          = d.get("show_intro", False)
             self.mg_tutorials_seen   = set(d.get("mg_tutorials_seen", []))
-            # Rueckwaertskompatibilitaet: wer Firewall hat, kennt RFC schon
-            if self.owned.get("firewall", 0) > 0:
-                self.rfc_unlocked   = True
-                if "show_rfc_intro" not in d:
-                    self.show_rfc_intro = False
             self.music_muted    = d.get("music_muted", False)
             self.sfx_muted      = d.get("sfx_muted", False)
             self.res_idx        = d.get("res_idx", 0)
             self.fps_idx        = d.get("fps_idx", 1)
             self.fullscreen     = d.get("fullscreen", False)
+
+            # Statistiken + Achievements
+            self.total_clicks   = d.get("total_clicks", 0)
+            self.minigames_won  = d.get("minigames_won", 0)
+            self.hs_success     = d.get("hs_success", 0)
+            self.best_combo     = d.get("best_combo", 0)
+            self.events_seen    = d.get("events_seen", 0)
+            self.play_secs      = d.get("play_secs", 0.0)
+            self.achievements   = set(d.get("achievements", []))
+            # Bereits erfuellte Achievements still uebernehmen (kein Toast-Flut
+            # bei Altspielstaenden, die das Feature noch nicht kannten).
+            self._sync_achievements(silent=True)
+
+            # ── Offline-Progress ──────────────────────────────────────
+            last = d.get("last_played")
+            if last is not None:
+                elapsed = time.time() - last
+                if elapsed >= OFFLINE_MIN_SECS:
+                    capped = min(elapsed, OFFLINE_CAP_SECS)
+                    rate     = self.raw_pps() * self.prestige_mult   # ohne Event
+                    gain     = rate * capped
+                    rfc_gain = self.rfc_rate * capped
+                    if gain >= 1 or rfc_gain >= 0.01:
+                        self.packets       += gain
+                        self.total_packets += gain
+                        self.rfc_points    += rfc_gain
+                        self.offline_gain   = gain
+                        self.offline_rfc    = rfc_gain
+                        self.offline_secs   = int(capped)
+                        self.show_offline   = True
         except Exception: pass
 
 # ── Zeichenfunktionen ─────────────────────────────────────────────────
@@ -2079,6 +2247,15 @@ def draw_tabs(game: Game):
         else:
             label, tcol = f"FORSCHUNG ({game.rfc_points:.0f} RFC)", WHITE if active else DIM
         text(screen, font_med, label, tcol, rect.centerx, rect.centery, "center")
+
+    # Stats/Achievement-Button (oben rechts)
+    mxp, myp = pygame.mouse.get_pos()
+    sbtn = _stats_btn_rect()
+    hov  = sbtn.collidepoint(mxp, myp)
+    draw_rect_border(screen, BORDER_A if hov else BORDER, sbtn,
+                     fill=PANEL_HL if hov else PANEL, radius=8)
+    text(screen, font_small, "≣ STATS", WHITE if hov else DIM,
+         sbtn.centerx, sbtn.centery, "center")
 
 
 def draw_shop(game: Game):
@@ -3315,6 +3492,167 @@ def rfc_intro_click(game: Game, mx, my) -> bool:
     return True  # alle Klicks ausserhalb auch konsumieren
 
 
+# ── Offline-Progress-Popup ────────────────────────────────────────────
+
+def fmt_dur(secs) -> str:
+    secs = int(secs)
+    h, m, s = secs // 3600, (secs % 3600) // 60, secs % 60
+    if h > 0: return f"{h}h {m}m"
+    if m > 0: return f"{m}m {s}s"
+    return f"{s}s"
+
+OFFLINE_W, OFFLINE_H = 560, 300
+
+def _offline_rects():
+    px = W // 2 - OFFLINE_W // 2
+    py = H // 2 - OFFLINE_H // 2
+    bw, bh = 240, 52
+    bx = px + OFFLINE_W // 2 - bw // 2
+    by = py + OFFLINE_H - bh - 26
+    return px, py, pygame.Rect(bx, by, bw, bh)
+
+
+def draw_offline(game: Game):
+    if not game.show_offline: return
+    overlay = pygame.Surface((W, H), pygame.SRCALPHA)
+    overlay.fill((0, 0, 0, 200))
+    screen.blit(overlay, (0, 0))
+
+    px, py, btn = _offline_rects()
+    cx = px + OFFLINE_W // 2
+    draw_rect_border(screen, GREEN_C, (px, py, OFFLINE_W, OFFLINE_H),
+                     fill=(15, 20, 28), radius=12)
+
+    text(screen, font_xl, "WILLKOMMEN ZURÜCK", GREEN_C, cx, py + 22, "midtop")
+    text(screen, font_small,
+         f"Dein Netz hat {fmt_dur(game.offline_secs)} weiter Pakete geroutet.",
+         DIM, cx, py + 74, "midtop")
+    text_glow(screen, font_big, f"+{fmt(game.offline_gain)} PKT", WHITE,
+              cx, py + 110, "midtop", glow_col=GREEN_C, intensity=1)
+    if game.offline_rfc >= 0.01:
+        text(screen, font_small, f"+{game.offline_rfc:.1f} RFC", RFC_COL,
+             cx, py + 156, "midtop")
+    text(screen, font_tiny,
+         f"(maximal {OFFLINE_CAP_SECS // 3600} h werden angerechnet)",
+         INK_MUTE, cx, py + 184, "midtop")
+
+    mx, my = pygame.mouse.get_pos()
+    hov = btn.collidepoint(mx, my)
+    draw_rect_border(screen, GREEN_C, btn,
+                     fill=PANEL_HL if hov else PANEL, radius=8)
+    text(screen, font_big, "EINSAMMELN", WHITE, btn.centerx, btn.y + 12, "midtop")
+
+
+def offline_click(game: Game, mx, my) -> bool:
+    if not game.show_offline: return False
+    _, _, btn = _offline_rects()
+    if btn.collidepoint(mx, my):
+        game.show_offline = False
+        play_sfx('buy')
+    return True  # alle Klicks blockieren, solange das Popup offen ist
+
+
+# ── Achievement-Toasts ────────────────────────────────────────────────
+
+def draw_ach_toasts(game: Game):
+    if not game.ach_toasts: return
+    now = pygame.time.get_ticks()
+    tw, th = 320, 56
+    for i, t in enumerate(game.ach_toasts[:3]):
+        p = (now - t["born"]) / ACH_TOAST_MS
+        if   p < 0.12: alpha = p / 0.12
+        elif p > 0.86: alpha = (1 - p) / 0.14
+        else:          alpha = 1.0
+        alpha = max(0.0, min(1.0, alpha))
+        tx, ty = W // 2 - tw // 2, 70 + i * (th + 10)
+        col = t["col"]
+        surf = pygame.Surface((tw, th), pygame.SRCALPHA)
+        pygame.draw.rect(surf, (15, 20, 28, 255), (0, 0, tw, th), border_radius=10)
+        pygame.draw.rect(surf, (*col, 255), (0, 0, tw, th), 2, border_radius=10)
+        pygame.draw.rect(surf, (*col, 255), (0, 0, 5, th))
+        text(surf, font_tiny, "★ ACHIEVEMENT", col, 18, 9)
+        text(surf, font_med, t["name"], WHITE, 18, 27)
+        surf.set_alpha(int(255 * alpha))
+        screen.blit(surf, (tx, ty))
+
+
+# ── Statistik- & Achievement-Screen ───────────────────────────────────
+
+def _stats_btn_rect():
+    """In-Game-Button oben rechts zum Öffnen des Stats-Screens."""
+    return pygame.Rect(W - 132, 4, 120, 36)
+
+def _stats_back_rect():
+    return pygame.Rect(W // 2 - 130, H - 78, 260, 50)
+
+
+def draw_stats_screen(game: Game):
+    mx, my = pygame.mouse.get_pos()
+    screen.blit(_bg_vignette(W, H), (0, 0))
+    text_glow(screen, font_xl, "STATISTIK & ACHIEVEMENTS", BORDER_A,
+              W // 2, 36, "midtop", glow_col=BORDER_A, intensity=1)
+
+    margin, gap, top = 60, 40, 110
+    panel_w = (W - margin * 2 - gap) // 2
+    panel_h = H - top - 108
+    left  = pygame.Rect(margin, top, panel_w, panel_h)
+    right = pygame.Rect(margin + panel_w + gap, top, panel_w, panel_h)
+    draw_rect_border(screen, BORDER, left,  fill=PANEL, radius=10)
+    draw_rect_border(screen, BORDER, right, fill=PANEL, radius=10)
+
+    # ── Statistik ──
+    text(screen, font_med, "STATISTIK", WHITE, left.x + 20, left.y + 14)
+    tiers = sum(1 for u in UPGRADES if game.owned.get(u["id"], 0) > 0)
+    stats = [
+        ("Gesamt-Pakete",          fmt(game.total_packets)),
+        ("Manuelle Klicks",        fmt(game.total_clicks)),
+        ("Handshakes",             str(game.hs_success)),
+        ("Beste Combo",            f"x{game.best_combo}"),
+        ("Events erlebt",          str(game.events_seen)),
+        ("Minispiele gewonnen",    str(game.minigames_won)),
+        ("Prestige-Stufe",         str(game.prestige)),
+        ("Prestige-Multiplikator", f"x{fmt(game.prestige_mult)}"),
+        ("Forschungen",            f"{len(game.research_done)}/{len(RESEARCH)}"),
+        ("Tiers besessen",         f"{tiers}/{len(UPGRADES)}"),
+        ("Spielzeit",              fmt_dur(game.play_secs)),
+    ]
+    sy = left.y + 52
+    for label, val in stats:
+        text(screen, font_small, label, DIM, left.x + 20, sy)
+        text(screen, font_small, val, WHITE, left.right - 20, sy, "topright")
+        sy += 31
+
+    # ── Achievements ──
+    done = len(game.achievements)
+    text(screen, font_med, f"ACHIEVEMENTS  {done}/{len(ACHIEVEMENTS)}",
+         WHITE, right.x + 20, right.y + 14)
+    inner_top = right.y + 52
+    row_h = (right.bottom - 16 - inner_top) / len(ACHIEVEMENTS)
+    for i, a in enumerate(ACHIEVEMENTS):
+        ry = inner_top + i * row_h
+        unlocked = a["id"] in game.achievements
+        mark = "✓" if unlocked else "•"
+        name_col = a["col"] if unlocked else DIM
+        text(screen, font_small, f"{mark} {a['name']}", name_col, right.x + 20, ry)
+        text(screen, font_tiny, a["desc"],
+             DIM if unlocked else INK_MUTE, right.x + 40, ry + 19)
+
+    back = _stats_back_rect()
+    hov = back.collidepoint(mx, my)
+    br = back.inflate(10, 10) if hov else back
+    draw_rect_border(screen, WHITE if hov else DIM, br,
+                     fill=PANEL_HL if hov else PANEL, radius=8)
+    text(screen, font_big, "BACK", WHITE, br.centerx, br.centery, "center")
+
+
+def stats_click(game: Game, mx, my) -> bool:
+    if _stats_back_rect().collidepoint(mx, my):
+        game.state = game.prev_state
+        play_sfx("click")
+        return True
+    return False
+
+
 # ── Main Menu ─────────────────────────────────────────────────────────
 
 def draw_main_menu(game: Game):
@@ -3364,8 +3702,12 @@ def draw_main_menu(game: Game):
     set_rect = pygame.Rect(bx, H//2 + 70, bw, bh)
     hero_btn(set_rect, BLUE_C, "SETTINGS", set_rect.collidepoint(mx, my))
 
+    # Stats & Achievements
+    stats_rect = pygame.Rect(bx, H//2 + 140, bw, bh)
+    hero_btn(stats_rect, ACCENT_2, "STATS", stats_rect.collidepoint(mx, my))
+
     # Exit
-    exit_rect = pygame.Rect(bx, H//2 + 140, bw, bh)
+    exit_rect = pygame.Rect(bx, H//2 + 210, bw, bh)
     hero_btn(exit_rect, RED_C, "EXIT", exit_rect.collidepoint(mx, my))
     
     # Audio Toggles
@@ -3400,8 +3742,15 @@ def menu_click(game: Game, mx, my) -> bool:
         game.state = "settings"
         play_sfx("click")
         return True
-        
-    exit_rect = pygame.Rect(bx, H//2 + 140, bw, bh)
+
+    stats_rect = pygame.Rect(bx, H//2 + 140, bw, bh)
+    if stats_rect.collidepoint(mx, my):
+        game.prev_state = "menu"
+        game.state = "stats"
+        play_sfx("click")
+        return True
+
+    exit_rect = pygame.Rect(bx, H//2 + 210, bw, bh)
     if exit_rect.collidepoint(mx, my):
         game.state = "exit_confirm"
         play_sfx("click")
@@ -3740,6 +4089,8 @@ def main():
                             game.state = "menu"
                     elif game.state == "settings":
                         game.state = "menu"
+                    elif game.state == "stats":
+                        game.state = game.prev_state
                     elif game.state == "exit_confirm":
                         game.state = "menu"
                     else:
@@ -3793,8 +4144,15 @@ def main():
                     elif game.state == "settings":
                         settings_click(game, mx, my)
                         continue
+                    elif game.state == "stats":
+                        stats_click(game, mx, my)
+                        continue
 
                     if debug_click(game, mx, my):
+                        continue
+
+                    # Offline-Progress-Popup blockt alle anderen Klicks
+                    if offline_click(game, mx, my):
                         continue
 
                     # Einführungs-Popup blockt alle anderen Klicks
@@ -3825,6 +4183,13 @@ def main():
 
                     # TCP-Handshake: Hit-Test auf fliegendes Paket
                     if game.try_hs_click(mx, my):
+                        continue
+
+                    # Stats/Achievement-Screen öffnen
+                    if _stats_btn_rect().collidepoint(mx, my):
+                        game.prev_state = "playing"
+                        game.state = "stats"
+                        play_sfx("click")
                         continue
 
                     # Tab-Wechsel
@@ -3878,8 +4243,10 @@ def main():
             if game.minigame is not None:
                 draw_minigame(game)
 
+            draw_ach_toasts(game)
             draw_rfc_intro(game)
             draw_intro(game)
+            draw_offline(game)
 
             draw_debug_menu(game)
         else:
@@ -3891,6 +4258,8 @@ def main():
                     draw_exit_confirm(game)
             elif game.state == "settings":
                 draw_settings_menu(game)
+            elif game.state == "stats":
+                draw_stats_screen(game)
 
         pygame.display.flip()
 

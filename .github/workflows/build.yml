@@ -1,4 +1,4 @@
-name: Build macOS App
+name: Test & Build
 
 on:
   push:
@@ -6,7 +6,28 @@ on:
   workflow_dispatch:
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run logic tests (headless)
+        env:
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy
+        run: pytest tests/ -q
+
   build-macos:
+    needs: test
     runs-on: macos-latest
 
     steps:
@@ -42,6 +63,7 @@ jobs:
           retention-days: 30
 
   build-windows:
+    needs: test
     runs-on: windows-latest
 
     steps:

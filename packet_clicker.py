@@ -228,6 +228,21 @@ UPGRADES = [
     {"id": "asn",        "name": "Autonomes System",  "abbr": "ASN", "col": BORDER_A,
      "desc": "Eigene BGP-Routing-Domain (ASN) im globalen Internet.",
      "base_price":15000000000, "pps":  400000},
+    {"id": "ixp",        "name": "Internet Exchange",  "abbr": "IXP", "col": BLUE_C,
+     "desc": "Peering-Drehkreuz, an dem Netze Traffic direkt tauschen.",
+     "base_price":150000000000, "pps": 1800000},
+    {"id": "tier1",      "name": "Tier-1 Carrier",     "abbr": "T1",  "col": ORANGE_C,
+     "desc": "Globales Backbone ohne Transit — sieht die Default-Free Zone.",
+     "base_price":1500000000000, "pps": 8000000},
+    {"id": "subsea",     "name": "Seekabel-System",    "abbr": "SEA", "col": CYAN_C,
+     "desc": "Transozeanische Glasfaser mit Terabit-Kapazitaet.",
+     "base_price":15000000000000, "pps": 36000000},
+    {"id": "satellite",  "name": "Satelliten-Mesh",    "abbr": "SAT", "col": GOLD,
+     "desc": "LEO-Konstellation: globale Abdeckung, niedrige RTT.",
+     "base_price":150000000000000, "pps": 160000000, "cdn": True},
+    {"id": "quantum",    "name": "Quanten-Backbone",   "abbr": "QBB", "col": PURPLE_C,
+     "desc": "Verschraenkte Links, abhoersicher per QKD.",
+     "base_price":1500000000000000, "pps": 720000000},
 ]
 
 # ── Forschungs-Definitionen ───────────────────────────────────────────
@@ -424,6 +439,26 @@ MG_PI_INTRO_BONUS = 3000      # erstes Paket bekommt extra Zeit
 MG_PI_FLASH_MS    = 850       # Feedback-Pause zwischen Paketen
 MG_PI_NEXT_DELAY  = 350       # ms Verzögerung bevor neues Paket spawnt
 
+# DNS Resolver (DNS-Challenge) – Zone-Tabelle lesen, richtige IP klicken
+MG_DNS_GOAL      = 10
+MG_DNS_LIVES     = 3
+MG_DNS_TIME_BASE = 5000       # ms pro Query am Anfang
+MG_DNS_TIME_MIN  = 2200       # untere Schranke
+MG_DNS_ZONE_N    = 4          # Eintraege in der Zone = Anzahl Antwortoptionen
+DNS_DOMAINS = ["api", "cdn", "mail", "shop", "auth", "db",
+               "vpn", "ns1", "img", "chat", "blog", "git"]
+
+# Load Balancer (Load-Balancer-Challenge) – Requests auf Pools verteilen
+MG_LB_GOAL      = 12
+MG_LB_LIVES     = 3
+MG_LB_POOLS     = 3
+MG_LB_TIME_BASE = 3500        # ms pro Request am Anfang
+MG_LB_TIME_MIN  = 1600        # untere Schranke
+MG_LB_DRAIN     = 0.0065      # Last/ms passiver Abfluss pro Pool
+MG_LB_W_BASE    = 22.0        # Basis-Last pro Request
+MG_LB_W_STEP    = 1.6         # +Last je erledigtem Request
+MG_LB_W_JITTER  = 8.0         # zufaellige Streuung der Last
+
 PI_RULES_POOL = [
     {"id":"telnet",  "text":"BLOCK  dst port 23",       "verdict":"drop",
      "match": lambda p: p["proto"] == "TCP" and p["dst_port"] == 23},
@@ -448,6 +483,8 @@ TIER_CHALLENGE = {
     "switch":   "frame_forwarder",
     "router":   "route_table",
     "firewall": "packet_inspector",
+    "dns":      "dns_resolver",
+    "loadbal":  "load_balancer",
 }
 
 def _ff_colors():
@@ -1131,6 +1168,37 @@ class Game:
                 "intro":         True,
                 "tutorial":      show_tutorial,
             }
+        elif mg_type == "dns_resolver":
+            self.minigame = {
+                "type":        "dns_resolver",
+                "target":      uid,
+                "score":       0,
+                "lives":       MG_DNS_LIVES,
+                "query":       None,
+                "timer_start": 0,
+                "timer_ms":    MG_DNS_TIME_BASE,
+                "next_spawn":  pygame.time.get_ticks() + 600,
+                "feedback":    None,
+                "result":      None,
+                "result_at":   0,
+                "tutorial":    show_tutorial,
+            }
+        elif mg_type == "load_balancer":
+            self.minigame = {
+                "type":        "load_balancer",
+                "target":      uid,
+                "score":       0,
+                "lives":       MG_LB_LIVES,
+                "loads":       [0.0] * MG_LB_POOLS,
+                "request":     None,
+                "timer_start": 0,
+                "timer_ms":    MG_LB_TIME_BASE,
+                "next_spawn":  pygame.time.get_ticks() + 600,
+                "feedback":    None,
+                "result":      None,
+                "result_at":   0,
+                "tutorial":    show_tutorial,
+            }
         else:
             return
         # Handshake zuruecksetzen waehrend Minigame
@@ -1353,6 +1421,46 @@ class Game:
                 mg["window_ms"] = mg["time_per_pkt"] + bonus
                 mg["deadline"]  = now + mg["window_ms"]
 
+        if mg["type"] == "dns_resolver":
+            if mg.get("feedback") and now - mg["feedback"]["at"] > 600:
+                mg["feedback"] = None
+            if mg["query"] is not None and mg.get("feedback") is None:
+                if now - mg["timer_start"] >= mg["timer_ms"]:
+                    mg["lives"] -= 1
+                    mg["feedback"]   = {"type": "timeout", "clicked": -1,
+                                        "correct": mg["query"]["correct"], "at": now}
+                    mg["query"]      = None
+                    mg["next_spawn"] = now + 700
+                    play_sfx('error')
+                    self._mg_check_end()
+            if mg["query"] is None and mg["result"] is None and now >= mg["next_spawn"]:
+                mg["query"]       = _dns_make_query()
+                mg["timer_start"] = now
+                t = min(1.0, mg["score"] / MG_DNS_GOAL)
+                mg["timer_ms"] = int(MG_DNS_TIME_BASE - (MG_DNS_TIME_BASE - MG_DNS_TIME_MIN) * t)
+
+        if mg["type"] == "load_balancer":
+            # Passiver Last-Abfluss aller Pools
+            for i in range(MG_LB_POOLS):
+                mg["loads"][i] = max(0.0, mg["loads"][i] - MG_LB_DRAIN * dt)
+            if mg.get("feedback") and now - mg["feedback"]["at"] > 500:
+                mg["feedback"] = None
+            if mg["request"] is not None and mg.get("feedback") is None:
+                if now - mg["timer_start"] >= mg["timer_ms"]:
+                    mg["lives"] -= 1
+                    mg["feedback"]   = {"type": "timeout", "pool": -1, "at": now}
+                    mg["request"]    = None
+                    mg["next_spawn"] = now + 600
+                    play_sfx('error')
+                    self._mg_check_end()
+            if mg["request"] is None and mg["result"] is None and now >= mg["next_spawn"]:
+                w = MG_LB_W_BASE + mg["score"] * MG_LB_W_STEP \
+                    + random.uniform(-MG_LB_W_JITTER, MG_LB_W_JITTER)
+                mg["request"]     = {"weight": max(12.0, min(60.0, w))}
+                mg["timer_start"] = now
+                t = min(1.0, mg["score"] / MG_LB_GOAL)
+                mg["timer_ms"] = int(MG_LB_TIME_BASE - (MG_LB_TIME_BASE - MG_LB_TIME_MIN) * t)
+
     def mg_move(self, direction):
         """direction: -1 = links, +1 = rechts. Tetris-artiges Spalten-Snapping."""
         mg = self.minigame
@@ -1420,6 +1528,67 @@ class Game:
             self._mg_check_end()
         mg["packet"]     = None
         mg["next_spawn"] = now + MG_PI_NEXT_DELAY
+
+    def dns_pick(self, idx):
+        """idx: gewaehlte Antwort-Option (IP) im DNS-Resolver."""
+        mg = self.minigame
+        if mg is None or mg.get("type") != "dns_resolver": return
+        if mg["result"] is not None or mg["query"] is None: return
+        if mg.get("feedback") is not None: return
+        now = pygame.time.get_ticks()
+        correct_idx = mg["query"]["correct"]
+        if idx == correct_idx:
+            mg["score"] += 1
+            mg["feedback"]   = {"type": "correct", "clicked": idx,
+                                "correct": correct_idx, "at": now}
+            mg["query"]      = None
+            mg["next_spawn"] = now + 450
+            play_sfx('buy')
+            if mg["score"] >= MG_DNS_GOAL:
+                self._mg_set_result("won")
+        else:
+            mg["lives"] -= 1
+            mg["feedback"]   = {"type": "wrong", "clicked": idx,
+                                "correct": correct_idx, "at": now}
+            mg["query"]      = None
+            mg["next_spawn"] = now + 700
+            play_sfx('error')
+            self._mg_check_end()
+
+    def lb_assign(self, idx):
+        """idx: Backend-Pool, dem der aktuelle Request zugewiesen wird."""
+        mg = self.minigame
+        if mg is None or mg.get("type") != "load_balancer": return
+        if mg["result"] is not None or mg["request"] is None: return
+        if mg.get("feedback") is not None: return
+        if not (0 <= idx < MG_LB_POOLS): return
+        now = pygame.time.get_ticks()
+        w = mg["request"]["weight"]
+        if mg["loads"][idx] + w <= 100.0:
+            mg["loads"][idx] += w
+            mg["score"] += 1
+            mg["feedback"]   = {"type": "correct", "pool": idx, "at": now}
+            mg["request"]    = None
+            mg["next_spawn"] = now + 300
+            play_sfx('buy')
+            if mg["score"] >= MG_LB_GOAL:
+                self._mg_set_result("won")
+        else:
+            mg["lives"] -= 1
+            mg["feedback"]   = {"type": "overflow", "pool": idx, "at": now}
+            mg["request"]    = None
+            mg["next_spawn"] = now + 600
+            play_sfx('error')
+            self._mg_check_end()
+
+    def mg_option(self, idx):
+        """Einheitlicher Options-Handler fuer die Zahltasten 1–4 / Klicks."""
+        mg = self.minigame
+        if mg is None: return
+        t = mg.get("type")
+        if   t == "route_table":   self.rt_click(idx)
+        elif t == "dns_resolver":  self.dns_pick(idx)
+        elif t == "load_balancer": self.lb_assign(idx)
 
     def _mg_set_result(self, result):
         mg = self.minigame
@@ -2696,6 +2865,51 @@ def _rt_route_rects(px, py):
             for i in range(3)]
 
 
+# ── DNS Resolver Helpers (DNS-Challenge) ──────────────────────────────
+
+def _dns_random_ip():
+    return (f"{random.randint(11,223)}.{random.randint(0,255)}."
+            f"{random.randint(0,255)}.{random.randint(1,254)}")
+
+def _dns_make_query():
+    """Baut eine Zone (Name→IP) + eine Anfrage. options = IPs in zufaelliger
+    Reihenfolge, correct = Index der richtigen IP in options."""
+    names = random.sample(DNS_DOMAINS, MG_DNS_ZONE_N)
+    zone  = [{"name": f"{n}.acme.net", "ip": _dns_random_ip()} for n in names]
+    qi    = random.randrange(MG_DNS_ZONE_N)
+    opts  = [z["ip"] for z in zone]
+    random.shuffle(opts)
+    correct = opts.index(zone[qi]["ip"])
+    return {"zone": zone, "name": zone[qi]["name"],
+            "options": opts, "correct": correct}
+
+def _dns_option_rects(px, py):
+    """2x2-Raster der Antwort-Buttons (IP-Adressen)."""
+    bw = (MG_PANEL_W - 60 - 16) // 2
+    bh = 48
+    x0 = px + 30
+    y0 = py + MG_PANEL_H - 150
+    rects = []
+    for i in range(MG_DNS_ZONE_N):
+        row, col = divmod(i, 2)
+        rects.append(pygame.Rect(x0 + col * (bw + 16),
+                                 y0 + row * (bh + 12), bw, bh))
+    return rects
+
+
+# ── Load Balancer Helpers (Load-Balancer-Challenge) ───────────────────
+
+def _lb_pool_rects(px, py):
+    """Drei Backend-Pool-Saeulen (Klick- und Anzeigeflaeche)."""
+    gap = 24
+    usable = MG_PANEL_W - 60 - gap * (MG_LB_POOLS - 1)
+    pw = usable // MG_LB_POOLS
+    ph = 200
+    y0 = py + 168
+    return [pygame.Rect(px + 30 + i * (pw + gap), y0, pw, ph)
+            for i in range(MG_LB_POOLS)]
+
+
 def _ff_drop_zones():
     """Passive Drop-Slots unter der Arena – spaltenausgerichtet."""
     _, py = _ff_panel_rect()
@@ -2760,6 +2974,32 @@ MG_TUTORIAL_TEXT = {
             "Falsche Entscheidung oder Zeitablauf kostet ein Leben!",
         ],
     },
+    "dns_resolver": {
+        "title": "DNS RESOLVER",
+        "lines": [
+            "Eine DNS-Anfrage nach einem Hostnamen erscheint.",
+            "Lies die Zone-Tabelle (Name → IP) und klicke",
+            "die passende A-Record-IP — per Maus oder Taste 1–4.",
+            "",
+            "Mit jedem Treffer wird die Zeit knapper.",
+            "Falsche IP oder Zeitablauf kostet ein Leben.",
+            "",
+            "Erreiche das Ziel-Score bevor alle Leben weg sind!",
+        ],
+    },
+    "load_balancer": {
+        "title": "LOAD BALANCER",
+        "lines": [
+            "Eingehende Requests bringen Last (%) mit.",
+            "Schicke jeden Request auf einen Backend-Pool",
+            "— per Klick oder Taste 1–3.",
+            "",
+            "Pools fließen mit der Zeit wieder ab. Überschreitet",
+            "ein Pool 100%, kostet das ein Leben (rote Vorschau!).",
+            "",
+            "Bediene genug Requests bevor alle Leben weg sind!",
+        ],
+    },
 }
 
 def _mg_tutorial_ok_rect():
@@ -2821,6 +3061,12 @@ def draw_minigame(game: Game):
         return
     if mg["type"] == "packet_inspector":
         _draw_packet_inspector(game, mg, px, py)
+        return
+    if mg["type"] == "dns_resolver":
+        _draw_dns_resolver(game, mg, px, py)
+        return
+    if mg["type"] == "load_balancer":
+        _draw_load_balancer(game, mg, px, py)
         return
     if mg["type"] != "frame_forwarder": return
 
@@ -3269,13 +3515,188 @@ def _draw_packet_inspector(game: Game, mg, px, py):
              DIM, px + MG_PANEL_W // 2, py + MG_PANEL_H - 20, "midtop")
 
 
+def _draw_dns_resolver(game: Game, mg, px, py):
+    now = pygame.time.get_ticks()
+    fb  = mg.get("feedback")
+    q   = mg["query"]
+
+    text(screen, font_xl, "DNS RESOLVER", GOLD,
+         px + MG_PANEL_W // 2, py + 10, "midtop")
+    text(screen, font_small,
+         "DNS-Challenge — finde die richtige A-Record-IP in der Zone",
+         DIM, px + MG_PANEL_W // 2, py + 52, "midtop")
+
+    text(screen, font_med, f"SCORE  {mg['score']} / {MG_DNS_GOAL}",
+         WHITE, px + 30, py + 78)
+    lives_txt = "LIVES " + ("● " * mg['lives']) + ("· " * (MG_DNS_LIVES - mg['lives']))
+    text(screen, font_med, lives_txt.strip(), RED_C,
+         px + MG_PANEL_W - 30, py + 78, "topright")
+
+    # ── Zone-Tabelle ────────────────────────────────────────────────
+    zone_x, zone_y = px + 30, py + 106
+    zone_w, zone_h = MG_PANEL_W - 60, 110
+    draw_rect_border(screen, BORDER, (zone_x, zone_y, zone_w, zone_h),
+                     fill=PANEL, radius=8)
+    text(screen, font_tiny, "ZONE  acme.net", DIM, zone_x + 12, zone_y + 6)
+    if q is not None:
+        ry = zone_y + 28
+        for rec in q["zone"]:
+            is_q = (rec["name"] == q["name"])
+            ncol = GOLD if is_q else WHITE
+            text(screen, font_small, rec["name"], ncol, zone_x + 16, ry)
+            text(screen, font_small, "A", DIM, zone_x + zone_w // 2 - 20, ry)
+            text(screen, font_small, rec["ip"], ncol if is_q else DIM,
+                 zone_x + zone_w - 16, ry, "topright")
+            ry += 20
+
+    # ── Query-Box ───────────────────────────────────────────────────
+    qb_x, qb_y = px + 30, py + 226
+    qb_w, qb_h = MG_PANEL_W - 60, 46
+    if q is not None:
+        draw_rect_border(screen, BORDER_A, (qb_x, qb_y, qb_w, qb_h),
+                         fill=PANEL_HL, radius=8)
+        text(screen, font_small, "QUERY  A?", CYAN_C, qb_x + 14, qb_y + 13)
+        text(screen, font_big, q["name"], WHITE, qb_x + qb_w // 2 + 30, qb_y + 9, "midtop")
+    elif fb is not None:
+        fb_col = GREEN_C if fb["type"] == "correct" else RED_C
+        fb_msg = {"correct": "RESOLVED!", "wrong": "NXDOMAIN!", "timeout": "TIMEOUT!"}[fb["type"]]
+        draw_rect_border(screen, fb_col, (qb_x, qb_y, qb_w, qb_h), fill=PANEL_HL, radius=8)
+        text(screen, font_big, fb_msg, fb_col, qb_x + qb_w // 2, qb_y + 9, "midtop")
+    else:
+        draw_rect_border(screen, BORDER, (qb_x, qb_y, qb_w, qb_h), fill=PANEL, radius=8)
+        text(screen, font_small, "next query...", DIM, qb_x + qb_w // 2, qb_y + 14, "midtop")
+
+    # Timer-Balken
+    bar_x, bar_y, bar_w, bar_h = qb_x, qb_y + qb_h + 8, qb_w, 7
+    pygame.draw.rect(screen, BORDER, (bar_x, bar_y, bar_w, bar_h), border_radius=3)
+    if q is not None:
+        ratio = max(0.0, 1.0 - (now - mg["timer_start"]) / mg["timer_ms"])
+        bc = GREEN_C if ratio > 0.5 else (ORANGE_C if ratio > 0.25 else RED_C)
+        pygame.draw.rect(screen, bc, (bar_x, bar_y, int(bar_w * ratio), bar_h), border_radius=3)
+
+    # ── Antwort-Optionen (IPs) ──────────────────────────────────────
+    rects = _dns_option_rects(px, py)
+    mx_, my_ = pygame.mouse.get_pos()
+    for i, r in enumerate(rects):
+        label = q["options"][i] if q is not None else "—"
+        is_hover = r.collidepoint(mx_, my_) and q is not None
+        fill, border_col = PANEL, BORDER_A
+        if fb is not None:
+            if i == fb.get("correct"):
+                border_col, fill = GREEN_C, (0, 40, 20)
+            elif i == fb.get("clicked") and fb["type"] == "wrong":
+                border_col, fill = RED_C, (40, 0, 0)
+        elif is_hover:
+            fill, border_col = PANEL_HL, WHITE
+        draw_rect_border(screen, border_col, r, fill=fill, radius=8)
+        text(screen, font_tiny, f"[{i+1}]", DIM, r.x + 8, r.y + 6)
+        text(screen, font_small, label, WHITE if (is_hover or fb) else BORDER_A,
+             r.centerx, r.centery - 8, "center")
+
+    if mg["result"] == "won":
+        text(screen, font_big, "ZONE RESOLVED — UNLOCKED",
+             GREEN_C, px + MG_PANEL_W // 2, py + MG_PANEL_H - 22, "midtop")
+    elif mg["result"] == "lost":
+        text(screen, font_big, "SERVFAIL — RETRY",
+             RED_C, px + MG_PANEL_W // 2, py + MG_PANEL_H - 22, "midtop")
+    else:
+        text(screen, font_tiny,
+             "Klicken oder 1–4 drücken  ·  ESC abbrechen  ·  Niederlage = 15s Sperre + 25% Verlust",
+             DIM, px + MG_PANEL_W // 2, py + MG_PANEL_H - 20, "midtop")
+
+
+def _draw_load_balancer(game: Game, mg, px, py):
+    now = pygame.time.get_ticks()
+    fb  = mg.get("feedback")
+    req = mg["request"]
+
+    text(screen, font_xl, "LOAD BALANCER", GOLD,
+         px + MG_PANEL_W // 2, py + 10, "midtop")
+    text(screen, font_small,
+         "LB-Challenge — verteile Requests, ohne dass ein Pool überläuft",
+         DIM, px + MG_PANEL_W // 2, py + 52, "midtop")
+
+    text(screen, font_med, f"SERVED  {mg['score']} / {MG_LB_GOAL}",
+         WHITE, px + 30, py + 78)
+    lives_txt = "LIVES " + ("● " * mg['lives']) + ("· " * (MG_LB_LIVES - mg['lives']))
+    text(screen, font_med, lives_txt.strip(), RED_C,
+         px + MG_PANEL_W - 30, py + 78, "topright")
+
+    # ── Eingehender Request ─────────────────────────────────────────
+    rb_x, rb_y = px + 30, py + 106
+    rb_w, rb_h = MG_PANEL_W - 60, 46
+    if req is not None:
+        draw_rect_border(screen, BORDER_A, (rb_x, rb_y, rb_w, rb_h), fill=PANEL_HL, radius=8)
+        text(screen, font_small, "INCOMING REQUEST", CYAN_C, rb_x + 14, rb_y + 14)
+        text(screen, font_big, f"{req['weight']:.0f}% Last",
+             WHITE, rb_x + rb_w - 16, rb_y + 9, "topright")
+    elif fb is not None:
+        ok = (fb["type"] == "correct")
+        draw_rect_border(screen, GREEN_C if ok else RED_C, (rb_x, rb_y, rb_w, rb_h),
+                         fill=PANEL_HL, radius=8)
+        msg = {"correct": "ROUTED!", "overflow": "OVERFLOW!", "timeout": "DROPPED!"}[fb["type"]]
+        text(screen, font_big, msg, GREEN_C if ok else RED_C,
+             rb_x + rb_w // 2, rb_y + 9, "midtop")
+    else:
+        draw_rect_border(screen, BORDER, (rb_x, rb_y, rb_w, rb_h), fill=PANEL, radius=8)
+        text(screen, font_small, "waiting...", DIM, rb_x + rb_w // 2, rb_y + 14, "midtop")
+
+    # Timer-Balken
+    bar_x, bar_y, bar_w, bar_h = rb_x, rb_y + rb_h + 6, rb_w, 7
+    pygame.draw.rect(screen, BORDER, (bar_x, bar_y, bar_w, bar_h), border_radius=3)
+    if req is not None:
+        ratio = max(0.0, 1.0 - (now - mg["timer_start"]) / mg["timer_ms"])
+        bc = GREEN_C if ratio > 0.5 else (ORANGE_C if ratio > 0.25 else RED_C)
+        pygame.draw.rect(screen, bc, (bar_x, bar_y, int(bar_w * ratio), bar_h), border_radius=3)
+
+    # ── Backend-Pools (vertikale Last-Säulen) ───────────────────────
+    rects = _lb_pool_rects(px, py)
+    mx_, my_ = pygame.mouse.get_pos()
+    w = req["weight"] if req is not None else 0.0
+    for i, r in enumerate(rects):
+        load = mg["loads"][i]
+        would_overflow = (req is not None and load + w > 100.0)
+        is_hover = r.collidepoint(mx_, my_) and req is not None
+        # Rahmen: Overflow-Vorschau rot, sonst Pool-Akzent
+        if fb is not None and fb.get("pool") == i:
+            border_col = GREEN_C if fb["type"] == "correct" else RED_C
+        elif would_overflow:
+            border_col = RED_C
+        elif is_hover:
+            border_col = WHITE
+        else:
+            border_col = BORDER_A
+        draw_rect_border(screen, border_col, r, fill=PANEL, radius=8)
+        # Füllung von unten
+        fill_h = int((r.h - 6) * min(1.0, load / 100.0))
+        lc = GREEN_C if load < 60 else (ORANGE_C if load < 85 else RED_C)
+        if fill_h > 0:
+            pygame.draw.rect(screen, lc, (r.x + 3, r.bottom - 3 - fill_h, r.w - 6, fill_h),
+                             border_radius=6)
+        text(screen, font_small, f"POOL {i+1}", WHITE, r.centerx, r.y + 8, "midtop")
+        text(screen, font_med, f"{load:.0f}%", WHITE, r.centerx, r.centery, "center")
+        text(screen, font_tiny, f"[{i+1}]", DIM, r.centerx, r.bottom - 20, "midtop")
+
+    if mg["result"] == "won":
+        text(screen, font_big, "TRAFFIC BALANCED — UNLOCKED",
+             GREEN_C, px + MG_PANEL_W // 2, py + MG_PANEL_H - 22, "midtop")
+    elif mg["result"] == "lost":
+        text(screen, font_big, "POOL SATURATED — RETRY",
+             RED_C, px + MG_PANEL_W // 2, py + MG_PANEL_H - 22, "midtop")
+    else:
+        text(screen, font_tiny,
+             "Pool klicken oder 1–3 drücken  ·  ESC abbrechen  ·  Niederlage = 15s Sperre + 25% Verlust",
+             DIM, px + MG_PANEL_W // 2, py + MG_PANEL_H - 20, "midtop")
+
+
 def minigame_click(game: Game, mx, my) -> bool:
     mg = game.minigame
     if mg is None: return False
     if mg.get("tutorial"):
         if _mg_tutorial_ok_rect().collidepoint(mx, my):
             mg["tutorial"] = False
-            if mg["type"] == "route_table":
+            # Erste Stimulus-Spawnzeit nach dem Tutorial frisch setzen
+            if mg["type"] in ("route_table", "dns_resolver", "load_balancer"):
                 mg["next_spawn"] = pygame.time.get_ticks() + 600
         return True
     if mg["result"] is not None: return True
@@ -3294,6 +3715,18 @@ def minigame_click(game: Game, mx, my) -> bool:
             game.pi_decide("allow")
         elif drop_r.collidepoint(mx, my):
             game.pi_decide("drop")
+    elif mg["type"] == "dns_resolver":
+        px, py = _ff_panel_rect()
+        for i, r in enumerate(_dns_option_rects(px, py)):
+            if r.collidepoint(mx, my):
+                game.dns_pick(i)
+                break
+    elif mg["type"] == "load_balancer":
+        px, py = _ff_panel_rect()
+        for i, r in enumerate(_lb_pool_rects(px, py)):
+            if r.collidepoint(mx, my):
+                game.lb_assign(i)
+                break
     # frame_forwarder: Bewegung erfolgt nur per Tastatur
     return True
 
@@ -4058,7 +4491,9 @@ def main():
     game     = Game()
     net      = NetViz(LEFT_W//2, 335, 90)
     menu_bg  = MenuBackground()
-    max_scroll_shop = max(0, len(UPGRADES)*74 + 150 - (H-42))
+    # Muss zur Geometrie in draw_shop passen (ITEM_H=92, SHOP_TOP=48, Footer 150),
+    # sonst sind die untersten Tiers nicht erreichbar.
+    max_scroll_shop = max(0, len(UPGRADES)*92 + 150 - (H-48))
     if not intro_played:
         start_bgm()
 
@@ -4114,11 +4549,13 @@ def main():
                         else:
                             game.mg_move(+1)
                     elif event.key == pygame.K_1:
-                        game.rt_click(0)
+                        game.mg_option(0)
                     elif event.key == pygame.K_2:
-                        game.rt_click(1)
+                        game.mg_option(1)
                     elif event.key == pygame.K_3:
-                        game.rt_click(2)
+                        game.mg_option(2)
+                    elif event.key == pygame.K_4:
+                        game.mg_option(3)
 
             if event.type == pygame.MOUSEWHEEL and game.state == "playing":
                 if game.tab == "upgrades":

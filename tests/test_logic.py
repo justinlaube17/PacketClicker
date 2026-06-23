@@ -15,6 +15,29 @@ def test_upgrade_price_scales_with_owned(game):
     assert game.upgrade_price("hub") == int(50 * (1.20 ** 3))
 
 
+# ── Tier-Progression (inkl. höhere Tiers ab IXP) ──────────────────────
+def test_tier_list_extended():
+    ids = [u["id"] for u in pc.UPGRADES]
+    assert ids[:10] == ["hub", "switch", "router", "firewall", "dns",
+                        "loadbal", "cdn", "datacenter", "cloud", "asn"]
+    # Neue Endgame-Tiers hängen hinten dran.
+    assert ids[10:] == ["ixp", "tier1", "subsea", "satellite", "quantum"]
+
+
+def test_prices_and_pps_strictly_increasing():
+    prices = [u["base_price"] for u in pc.UPGRADES]
+    ppss   = [u["pps"] for u in pc.UPGRADES]
+    assert prices == sorted(prices) and len(set(prices)) == len(prices)
+    assert ppss == sorted(ppss) and len(set(ppss)) == len(ppss)
+
+
+def test_higher_tiers_not_challenge_gated(game):
+    # Tiers oberhalb der Firewall haben keine Unlock-Challenge.
+    for uid in ("ixp", "tier1", "subsea", "satellite", "quantum"):
+        assert uid not in pc.TIER_CHALLENGE
+        assert game.needs_challenge(uid) is False
+
+
 # ── Pakete/s ──────────────────────────────────────────────────────────
 def test_raw_pps_sums_owned(game):
     game.owned = {"hub": 2}          # hub = 0.5 pps

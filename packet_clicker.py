@@ -1,7 +1,76 @@
 """
-Packet Clicker  —  Netzwerk-Idle-Game
-Klicke Pakete, forsche, bau dein Autonomes System aus!
-ESC = Beenden  |  Scrollrad = scrollen  |  Tab-Klick = Ansicht wechseln
+Packet Clicker — Netzwerk-thematisches Idle-/Clicker-Spiel (pygame).
+
+Klicke Pakete, kaufe Netzwerk-Equipment (Hub … Quanten-Backbone), forsche mit
+RFC-Punkten, bestehe Tier-Unlock-Minispiele und steige per Prestige auf.
+
+STEUERUNG
+    Linksklick      Paket-Kreis klicken / Buttons / Shop / Forschung
+    Leertaste       Klick auf den Paket-Kreis (wenn Maus links)
+    Mausrad         Shop scrollen
+    Tab-Leiste      Ansicht wechseln (Upgrades / Forschung)
+    1–4 / A,D       Minispiel-Eingaben · 1/2 Event-Entscheidung
+    ESC             Popup schließen / Minispiel abbrechen / zurück ins Menü
+    F12             Debug-Menü (Events manuell auslösen)
+
+ARCHITEKTUR
+    Bewusst eine einzige Datei (einfacher Build/Distribution via PyInstaller).
+    Die Datei ist in klar abgegrenzte Abschnitte gegliedert; jeder beginnt mit
+    einem ``# ── Titel ──``-Banner. Reihenfolge von oben nach unten:
+
+        1.  Pfad-/Asset-Helfer, pygame-Init, Display-Settings
+        2.  Sound-System (prozedurale SFX + BGM)
+        3.  Farben (Design-Tokens) und Fonts
+        4.  Save-Format-Versionierung + migrate_save()
+        5.  CONTENT-DATEN (rein deklarativ, hier wird balanciert/erweitert):
+              UPGRADES, RESEARCH, RFC_SHOP, EVENTS, CHOICE_EVENTS,
+              ACHIEVEMENTS, PI_RULES_POOL, TIER_CHALLENGE + Tuning-Konstanten
+        6.  Render-Hilfsfunktionen (Gradienten, Glow, Text, Caching)
+        7.  Animations-Klassen: FloatingText, NetPacket, DDoSPacket, NetViz,
+              MenuBackground
+        8.  class Game — der gesamte Spielzustand + Spiellogik (Single Source
+              of Truth). Zeichnet NICHT, hält nur Zustand und Regeln.
+        9.  Zeichenfunktionen draw_* (lesen Game, schreiben auf `screen`)
+        10. Klick-/Eingabe-Handler (*_click) und Minispiel-Rendering
+        11. Popups/Overlays (Intro, RFC-Intro, Offline, Stats, RFC-Shop,
+              Event-Entscheidung) sowie Menüs
+        12. main() — Hauptschleife: Events → game.update(dt) → draw → flip
+
+    Trennung Zustand/Darstellung: `Game` kennt keine pygame-Surfaces; die
+    draw_*-Funktionen lesen nur aus `game` und rendern auf das globale `screen`.
+
+ZUSTANDS-MASCHINE (game.state)
+    "menu" · "playing" · "settings" · "stats" · "exit_confirm"
+    Innerhalb von "playing" gibt es modale Overlays (Popups), die Klicks
+    abfangen, solange ihr Flag gesetzt ist (show_intro, show_rfc_intro,
+    show_offline, show_rfc_shop, event_choice, minigame).
+
+ERWEITERN — KOCHREZEPTE (alles rein über die Content-Daten in Abschnitt 5)
+    Upgrade-Tier:   Dict an UPGRADES anhängen. Erscheint automatisch im Shop,
+                    Preis skaliert mit 1.20**Anzahl. Optional "cdn": True für
+                    den Anycast-Forschungsbonus. Für eine Unlock-Challenge
+                    zusätzlich in TIER_CHALLENGE eintragen (Minispiel muss
+                    existieren).
+    Forschung:      Dict an RESEARCH anhängen. "effect" muss ein Key aus
+                    Game._compute_fx() sein; "pos" = (Spalte 0–2, Reihe). Neue
+                    Effekt-Art? Key im fx-Default ergänzen und im Code anwenden.
+    RFC-Shop:       Dict an RFC_SHOP anhängen + Effekt umsetzen (Multiplikator
+                    in _compute_fx, aktiver Effekt in Game.update()).
+    Event:          Dict an EVENTS anhängen (pps_m<0 = aktiver Paket-Diebstahl).
+    Entscheidung:   Dict an CHOICE_EVENTS anhängen; jede Option hat ein
+                    "outcome" mit rfc_cost / cost_pct / event.
+    Achievement:    Dict an ACHIEVEMENTS anhängen; "check": lambda g -> bool.
+    Minispiel:      Größer — start_minigame(), _update_minigame(), draw_minigame(),
+                    minigame_click()/mg_option(), MG_TUTORIAL_TEXT und ein
+                    TIER_CHALLENGE-Eintrag. Siehe Game.minigame-Doc (Dict-Form).
+
+SPEICHERN
+    JSON unter SAVE_PATH, versioniert über SAVE_VERSION; migrate_save() hebt
+    alte Stände an. Auto-Save alle 30 s sowie bei wichtigen Aktionen.
+
+HEADLESS/TESTS
+    Mit SDL_VIDEODRIVER=dummy + SDL_AUDIODRIVER=dummy lässt sich das Modul ohne
+    Fenster importieren und rendern (siehe tests/). `pytest tests/`.
 """
 
 import pygame, sys, math, random, json, os, array, time
@@ -197,6 +266,16 @@ def migrate_save(d: dict) -> dict:
     return d
 
 # ── Upgrade-Definitionen ──────────────────────────────────────────────
+# Käufliche Netzwerk-Tiers, aufsteigend sortiert (Reihenfolge = Shop-Reihenfolge
+# und bestimmt is_challenge_available). Jeder Eintrag:
+#   id          eindeutiger Schlüssel (Save, owned-Dict, TIER_CHALLENGE)
+#   name        Anzeigename im Shop
+#   abbr        Kürzel fürs Badge (2–3 Zeichen)
+#   col         Tier-Farbe (Akzente/Badge)
+#   desc        Einzeiler unter dem Namen
+#   base_price  Grundpreis; effektiver Preis = base_price * 1.20**owned
+#   pps         Pakete/s pro Exemplar (vor Multiplikatoren)
+#   cdn         optional True → profitiert vom Anycast-Forschungsbonus (cdn_mult)
 UPGRADES = [
     {"id": "hub",        "name": "Hub",              "abbr": "HUB", "col": DIM,
      "desc": "Broadcastet alles an jeden. Veraltet, aber billig.",
@@ -246,7 +325,17 @@ UPGRADES = [
 ]
 
 # ── Forschungs-Definitionen ───────────────────────────────────────────
-# pos = (Spalte 0-2, Zeile 0-3)
+# Einmalige, mit RFC-Punkten freischaltbare Knoten in einem Baum (3 Spalten ×
+# Tier-Reihen). Erforschte Effekte sind dauerhaft und überleben Prestige.
+#   id          eindeutiger Schlüssel (Save: research_done-Set)
+#   name/col    Anzeige
+#   cost        RFC-Kosten (einmalig)
+#   prereqs     Liste von ids, die zuerst erforscht sein müssen
+#   pos         (Spalte 0–2, Reihe 0..N) — bestimmt Position und Tier-Label.
+#               Reihen > 4 laufen bei 1280×720 unten aus dem Bild.
+#   desc        Effekt-Text
+#   effect      Key aus Game._compute_fx() (z.B. "pps_mult", "rfc_mult", …)
+#   val         Multiplikator/Wert, der auf fx[effect] multipliziert wird
 RESEARCH = [
     # Tier 1 – Grundlagen
     {"id": "osi",       "name": "OSI-Modell",      "col": BLUE_C,   "cost":   5,
@@ -317,11 +406,16 @@ RESEARCH = [
 
 # ── RFC-Shop: wiederholbare, skalierende Upgrades ─────────────────────
 # Im Gegensatz zu den einmaligen Forschungsknoten beliebig oft kaufbar;
-# Kosten steigen je Stufe. Permanenter RFC-Langzeit-Sink.
-RFC_OC_STEP   = 0.05    # +5% Klick/Stufe (overclock)
-RFC_PP_STEP   = 0.05    # +5% pps/Stufe (pipelining)
-RFC_AUTO_STEP = 0.5     # +0.5 Auto-Klicks/s pro Stufe (autoresolver)
+# Kosten steigen je Stufe. Permanenter RFC-Langzeit-Sink, überlebt Prestige.
+# Stufen liegen in Game.rfc_upgrades (id -> Level). Effekte sind NICHT
+# automatisch — jeder Eintrag braucht zusätzlich Code (Multiplikator in
+# _compute_fx oder aktiver Effekt in Game.update()).
+RFC_OC_STEP   = 0.05    # +5% Klick/Stufe  (overclock → fx["click_mult"])
+RFC_PP_STEP   = 0.05    # +5% pps/Stufe    (pipelining → fx["pps_mult"])
+RFC_AUTO_STEP = 0.5     # +0.5 Auto-Klicks/s pro Stufe (autoresolver, in update)
 
+# Schema: id, name, col, desc, base (Kosten Stufe 0), mult (Kostenfaktor/Stufe).
+# Kosten Stufe n = int(base * mult**n).
 RFC_SHOP = [
     {"id": "overclock",    "name": "Overclock",     "col": GREEN_C,
      "desc": "+5% Pakete/Klick pro Stufe",  "base": 25, "mult": 1.55},
@@ -332,6 +426,14 @@ RFC_SHOP = [
 ]
 
 # ── Ereignisse ────────────────────────────────────────────────────────
+# Zufällige, zeitlich begrenzte Buffs/Debuffs. Game.update() zieht eins und
+# setzt game.event + event_until. Schema:
+#   id/name/col/desc  Anzeige
+#   dur               Dauer in Sekunden (negative Events ggf. via neg_dur gekürzt)
+#   pps_m             Multiplikator auf Pakete/s; pps_m < 0 = aktiver Diebstahl
+#                     (Anteil von raw_pps wird pro Sekunde abgezogen)
+#   clk_m             Multiplikator auf Klick-Power
+#   negative          True → zählt als negativ (Forschung neg_dur/neg_eff greift)
 EVENTS = [
     {"id": "ddos",    "name": "DDoS-Angriff!",     "col": RED_C,    "dur": 15,
      "desc": "Pakete/s auf 25% reduziert.",          "pps_m": 0.25, "clk_m": 1.0, "negative": True},
@@ -351,8 +453,14 @@ EVENTS = [
 
 # ── Event-Entscheidungen ──────────────────────────────────────────────
 # Manche Ereignisse stellen dich vor eine Wahl mit Trade-off, statt einfach
-# zu passieren. Jede Option hat ein "outcome": optionale RFC-/Paket-Kosten
-# und ein resultierendes Event (oder keins).
+# zu passieren. Liegt offen in game.event_choice (blockt Klicks bis zur Wahl);
+# Game.resolve_event_choice(i) wendet das gewählte outcome an. Schema:
+#   id/name/col/desc  Anzeige
+#   options           genau 2 (UI erwartet 2): je {label, desc, outcome}
+#   outcome           optionale Keys:
+#                       rfc_cost  RFC sofort abziehen
+#                       cost_pct  Anteil der Pakete sofort abziehen (0..1)
+#                       event     ein EVENTS-förmiges Dict, das aktiv wird
 CHOICE_EVENT_PROB = 0.5      # Anteil der Ereignisse, die zur Entscheidung werden
 
 CHOICE_EVENTS = [
@@ -396,7 +504,11 @@ OFFLINE_CAP_SECS = 8 * 3600    # max. 8 h werden gutgeschrieben
 ACH_TOAST_MS = 3600            # Anzeigedauer einer Benachrichtigung (ms)
 
 # ── Achievements ──────────────────────────────────────────────────────
-# check(g) -> bool. Einmal erreicht, bleiben sie dauerhaft (ueberleben Prestige).
+# Game._sync_achievements() prüft jeden Frame alle Einträge; neu erfüllte
+# landen in game.achievements (Set von ids) und lösen einen Toast aus.
+# Schema: id, name, col, desc, check (Callable g -> bool). Einmal erreicht,
+# bleiben sie dauerhaft (überleben Prestige). check muss billig + seiteneffektfrei
+# sein (läuft 60×/s).
 ACHIEVEMENTS = [
     {"id": "first_click",  "name": "Erstes Paket",      "col": GREEN_C,
      "desc": "Generiere dein erstes Paket.",
@@ -527,6 +639,9 @@ MG_LB_W_BASE    = 22.0        # Basis-Last pro Request
 MG_LB_W_STEP    = 1.6         # +Last je erledigtem Request
 MG_LB_W_JITTER  = 8.0         # zufaellige Streuung der Last
 
+# Regel-Pool für das Packet-Inspector-Minispiel (Firewall-ACL). _pi_build_rules()
+# wählt 3 Regeln (>=1 ALLOW, >=1 BLOCK). Schema: id, text (Anzeige),
+# verdict ("allow"/"drop"), match (Callable Paket-Dict -> bool).
 PI_RULES_POOL = [
     {"id":"telnet",  "text":"BLOCK  dst port 23",       "verdict":"drop",
      "match": lambda p: p["proto"] == "TCP" and p["dst_port"] == 23},
@@ -544,8 +659,12 @@ PI_RULES_POOL = [
      "match": lambda p: p.get("flags") == "SYN+FIN"},
 ]
 
-# Welcher Tier braucht welchen Minigame-Typ?
-# Tiers, die hier NICHT auftauchen, sind automatisch freigeschaltet.
+# Welcher Tier braucht welchen Minigame-Typ, um freigeschaltet zu werden?
+# Tiers, die hier NICHT auftauchen, sind automatisch freigeschaltet (sobald
+# bezahlbar). Die Reihenfolge in UPGRADES bestimmt das progressive Gating:
+# eine Challenge ist erst verfügbar, wenn die vorherige Challenge bestanden ist
+# (siehe Game.is_challenge_available). Werte = Minispiel-Typ-Strings, die in
+# start_minigame/_update_minigame/draw_minigame behandelt werden müssen.
 TIER_CHALLENGE = {
     "hub":      "cable_patch",
     "switch":   "frame_forwarder",
@@ -707,6 +826,8 @@ def text_glow(surf, font, txt, col, x, y, anchor="topleft", glow_col=None, inten
 # ── FloatingText ──────────────────────────────────────────────────────
 
 class FloatingText:
+    """Kurzlebiger, nach oben schwebender und ausblendender Text (z.B. "+5 PKT"
+    bei einem Klick). Lebt in game.floats; .done() signalisiert das Aufräumen."""
     def __init__(self, x, y, msg, col=GREEN_C):
         self.x, self.y = float(x), float(y)
         self.msg = msg; self.col = col
@@ -727,6 +848,8 @@ class FloatingText:
 # ── Netzwerk-Paket (Animation) ────────────────────────────────────────
 
 class NetPacket:
+    """Dekoratives Paket, das beim Klick vom Klick-Punkt zu einem gekauften
+    Shop-Tier fliegt (Bezier-Bogen). Rein visuell, lebt in game.net_packets."""
     def __init__(self, sx, sy, tx, ty, col=BORDER_A):
         self.x, self.y   = float(sx), float(sy)
         self.tx, self.ty = float(tx), float(ty)
@@ -749,6 +872,9 @@ class NetPacket:
 # ── DDoS-Paket (Mini-Game) ─────────────────────────────────────────────
 
 class DDoSPacket:
+    """Rotes Angriffspaket, das während eines DDoS-Events herabfällt. Wird es
+    angeklickt ("gefiltert"), verkürzt das die Event-Dauer. Lebt in
+    game.ddos_packets."""
     def __init__(self, x, y):
         self.x, self.y = float(x), float(y)
         self.vx = random.uniform(-1, 1)
@@ -773,6 +899,8 @@ class DDoSPacket:
 # ── Netzwerk-Visualisierung ───────────────────────────────────────────
 
 class NetViz:
+    """Animierte Knoten-/Orbit-Grafik hinter dem Klick-Kreis (rein dekorativ).
+    Wird einmal in main() erzeugt und pro Frame über update(dt) weitergedreht."""
     def __init__(self, cx, cy, r):
         self.cx, self.cy, self.r = cx, cy, r
         self._t = 0.0
@@ -807,6 +935,9 @@ class NetViz:
 # ── Main Menu Animation ───────────────────────────────────────────────
 
 class MenuBackground:
+    """Driftendes Knoten-Netz mit verbindenden Linien als Hintergrund der Menüs
+    (Haupt-, Settings-, Stats-Screen). Eigenständige Animation, unabhängig vom
+    Spielzustand."""
     def __init__(self):
         self.nodes = []
         for _ in range(60):
@@ -851,10 +982,48 @@ class MenuBackground:
 # ── Spielzustand ─────────────────────────────────────────────────────
 
 class Game:
+    """Gesamter Spielzustand + Spiellogik (Single Source of Truth).
+
+    Hält ausschließlich Daten und Regeln — kennt keine pygame-Surfaces und
+    zeichnet nichts. Die draw_*-Funktionen lesen aus einer Game-Instanz und
+    rendern auf das globale `screen`. Pro Prozess existiert genau eine Instanz,
+    zusätzlich referenziert über das Modul-Global CURRENT_GAME (damit play_sfx
+    die Stummschaltung kennt).
+
+    Wichtige Zustands-Gruppen (Details an den Feldern in __init__):
+        Währungen/Fortschritt  packets, total_packets, owned, prestige,
+                               prestige_mult, rfc_points, research_done,
+                               rfc_upgrades, unlocked
+        Laufende Effekte       event/event_until/event_choice, click_buff_until
+        TCP-Handshake          hs_* (Skillshot-Minispiel über dem Klick-Kreis)
+        Minispiele             minigame (siehe unten), challenge_cooldown
+        UI/Overlays            state, tab, show_* Flags, *_scroll
+        Statistik/Achievements total_clicks, hs_success, achievements, …
+
+    Abgeleitete Werte sind Properties (pps, click_power, rfc_rate, fx …) und
+    werden bei Bedarf neu berechnet; Forschungs-/Shop-Effekte sind in `fx`
+    gecacht und via _invalidate_fx() nach jeder Änderung zu verwerfen.
+
+    self.minigame ist None oder ein Dict, dessen Felder vom "type" abhängen.
+    Gemeinsame Felder aller Typen:
+        type        Minispiel-Typ-String (siehe TIER_CHALLENGE)
+        target      uid des Tiers, das bei Sieg freigeschaltet wird
+        lives       verbleibende Leben
+        result      None | "won" | "lost"  (nach result_at folgt _finish)
+        result_at   ms-Zeitstempel des Ergebnisses
+        tutorial    True solange das Erklär-Overlay sichtbar ist
+    Typ-spezifische Felder (Auswahl):
+        cable_patch        cables[], dragging_idx, start_time
+        frame_forwarder    score, frame, next_spawn
+        route_table        score, packet_ip, correct, timer_start/ms, feedback
+        packet_inspector   rules, score, packet, deadline, time_per_pkt, feedback
+        dns_resolver       score, query{zone,name,options,correct}, timer_*, feedback
+        load_balancer      score, loads[3], request{weight}, timer_*, feedback
+    """
     def __init__(self):
         global CURRENT_GAME
         CURRENT_GAME = self
-        
+
         self.packets        = 0.0
         self.total_packets  = 0.0
         self.owned          = {}
@@ -941,6 +1110,11 @@ class Game:
 
     # ── Forschungs-Effekte ───────────────────────────────────────────
     def _compute_fx(self):
+        """Aggregiert alle dauerhaften Multiplikatoren aus Forschung + RFC-Shop
+        zu einem fx-Dict. Jeder RESEARCH-Effekt multipliziert seinen Key; die
+        wiederholbaren RFC-Shop-Upgrades kommen additiv-pro-Stufe dazu. Ergebnis
+        wird in fx gecacht (siehe Property fx / _invalidate_fx). Neue Effekt-Art
+        = hier einen Default-Key ergänzen UND ihn an der Wirkungsstelle anwenden."""
         fx = {"click_mult":1.0,"pps_mult":1.0,"all_mult":1.0,
               "neg_dur":1.0,"neg_eff":1.0,"cdn_mult":1.0,"prestige_bonus":1.0,
               # Tier-5-Ast "Betrieb & Automation"
@@ -985,6 +1159,9 @@ class Game:
     # ── RFC-Generierung ──────────────────────────────────────────────
     @property
     def rfc_rate(self):
+        """RFC-Punkte pro Sekunde. 0 bis RFC freigeschaltet ist (erste Firewall).
+        Steigt mit jedem unterschiedlichen besessenen Tier und je abgeschlossener
+        Forschung, skaliert mit dem Monitoring-Bonus (rfc_mult)."""
         if not self.rfc_unlocked:
             return 0.0
         unique = sum(1 for u in UPGRADES if self.owned.get(u["id"],0) > 0)
@@ -992,6 +1169,9 @@ class Game:
 
     # ── Pakete/s ─────────────────────────────────────────────────────
     def raw_pps(self):
+        """Basis-Pakete/s aus allen besessenen Tiers, inkl. Forschungs-/Shop-
+        Multiplikatoren (pps_mult, all_mult, cdn_mult), aber OHNE Prestige und
+        OHNE Event-Effekte. Grundlage für pps, pps_drain und Offline-Ertrag."""
         total = 0.0
         cdn_m = self.fx["cdn_mult"]
         for u in UPGRADES:
@@ -1005,6 +1185,10 @@ class Game:
 
     @property
     def pps(self):
+        """Effektive Pakete/s: raw_pps × Prestige × aktiver Event-Multiplikator.
+        Negative-Event-Wirkung wird durch neg_eff (Zero-Trust-Forschung)
+        abgemildert. Diebstahl-Events (pps_m<0) werden NICHT hier, sondern
+        separat über pps_drain abgezogen."""
         base = self.raw_pps() * self.prestige_mult
         if self.event:
             m = self.event.get("pps_m", 1.0)
@@ -1024,6 +1208,9 @@ class Game:
 
     @property
     def click_power(self):
+        """Pakete pro manuellem Klick: Sockel 1 plus 10% der raw_pps, dann
+        Prestige- und Klick-Multiplikatoren, aktiver Event-clk_m und (falls
+        aktiv) der x2-Buff aus einem perfekten 3-Phasen-Handshake."""
         base = (1.0 + self.raw_pps() * 0.1) * self.prestige_mult
         base *= self.fx["click_mult"] * self.fx["all_mult"]
         if self.event:
@@ -1041,6 +1228,7 @@ class Game:
 
     # ── Upgrade-Preis ────────────────────────────────────────────────
     def upgrade_price(self, uid):
+        """Aktueller Kaufpreis eines Tiers: base_price × 1.20^(bereits besessen)."""
         u = next(u for u in UPGRADES if u["id"] == uid)
         return int(u["base_price"] * (1.20 ** self.owned.get(uid, 0)))
 
@@ -1178,18 +1366,27 @@ class Game:
 
     # ── Tier-Unlock-Minigame ─────────────────────────────────────────
     def needs_challenge(self, uid):
+        """True, wenn das Tier eine (noch nicht bestandene) Unlock-Challenge hat."""
         return (uid in TIER_CHALLENGE) and (uid not in self.unlocked)
 
     def is_challenge_available(self, uid):
+        """Progressives Gating: die Challenge eines Tiers ist erst spielbar, wenn
+        die Challenge des in UPGRADES davorliegenden Challenge-Tiers bestanden
+        (= im unlocked-Set) ist. Tiers ohne Challenge sind immer verfügbar."""
         if uid not in TIER_CHALLENGE: return True
         order = [u["id"] for u in UPGRADES if u["id"] in TIER_CHALLENGE]
         idx = order.index(uid)
         return idx == 0 or order[idx - 1] in self.unlocked
 
     def challenge_cd_left(self, uid):
+        """Verbleibende Sperrzeit (ms) nach einer verlorenen Challenge."""
         return max(0, self.challenge_cooldown.get(uid, 0) - pygame.time.get_ticks())
 
     def start_minigame(self, uid):
+        """Startet die Tier-Unlock-Challenge für `uid` (initialisiert das
+        passende self.minigame-Dict je nach TIER_CHALLENGE-Typ). No-op, wenn die
+        Challenge nicht nötig, nicht verfügbar oder noch gesperrt ist. Neuer
+        Minispiel-Typ: hier einen elif-Zweig mit dem Start-Dict ergänzen."""
         if not self.needs_challenge(uid): return
         if not self.is_challenge_available(uid): return
         if self.challenge_cd_left(uid) > 0: return
@@ -1420,6 +1617,10 @@ class Game:
         return int(MG_FF_RESPAWN_BASE - (MG_FF_RESPAWN_BASE - MG_FF_RESPAWN_MIN) * (t ** MG_FF_FALL_CURVE))
 
     def _update_minigame(self, dt):
+        """Tickt das aktive Minispiel (statt der normalen Spiel-Logik — siehe
+        update()). Pausiert während des Tutorials; nach gesetztem result wird
+        nach MG_RESULT_DELAY _finish_minigame() aufgerufen. Pro Typ ein Block.
+        Neuer Typ: hier Timeout/Spawn/Fortschritt analog ergänzen."""
         mg = self.minigame
         if mg is None: return
         if mg.get("tutorial"): return
@@ -1669,6 +1870,8 @@ class Game:
         elif t == "load_balancer": self.lb_assign(idx)
 
     def _mg_set_result(self, result):
+        """Markiert Sieg/Niederlage ("won"/"lost"). Das Ergebnis bleibt für
+        MG_RESULT_DELAY ms sichtbar, danach räumt _finish_minigame() auf."""
         mg = self.minigame
         mg["result"]    = result
         mg["result_at"] = pygame.time.get_ticks()
@@ -1676,6 +1879,9 @@ class Game:
         play_sfx('prestige' if result == "won" else 'event_neg')
 
     def _finish_minigame(self):
+        """Schließt das Minispiel ab: bei Sieg wird das Ziel-Tier freigeschaltet
+        (dauerhaft, überlebt Prestige) und gespeichert; bei Niederlage greift
+        _mg_apply_loss (Paket-Verlust + Cooldown)."""
         mg = self.minigame
         if mg is None: return
         target = mg["target"]
@@ -1784,6 +1990,11 @@ class Game:
 
     # ── Update ───────────────────────────────────────────────────────
     def update(self, dt):
+        """Ein Spiel-Tick (dt = Millisekunden seit letztem Frame). Läuft nur im
+        Zustand "playing". Schreibt Pakete/RFC fort, altert Animationen, tickt
+        Handshake, würfelt Events/Entscheidungen aus, prüft Achievements und
+        speichert periodisch. Bei aktivem Minispiel wird stattdessen nur
+        _update_minigame() ausgeführt (der Rest pausiert)."""
         if self.minigame is not None:
             self._update_minigame(dt)
             return
@@ -1855,6 +2066,10 @@ class Game:
 
     # ── Speichern / Laden ─────────────────────────────────────────────
     def save(self):
+        """Schreibt den Spielstand als JSON nach SAVE_PATH (inkl. SAVE_VERSION
+        und einem Wanduhr-Zeitstempel last_played für den Offline-Progress).
+        Fehler werden bewusst geschluckt, damit ein I/O-Problem nie das Spiel
+        abstürzen lässt. Neues persistentes Feld: hier UND in load() ergänzen."""
         try:
             with open(SAVE_PATH, "w") as f:
                 json.dump({"version": SAVE_VERSION,
@@ -1887,6 +2102,10 @@ class Game:
         except Exception: pass
 
     def load(self):
+        """Lädt den Spielstand (falls vorhanden), hebt ihn via migrate_save() auf
+        SAVE_VERSION an und verrechnet anschließend den Offline-Ertrag seit
+        last_played. Fehlt/defekt die Datei, bleiben die __init__-Defaults
+        (Neues Spiel). Wird einmalig aus __init__ aufgerufen."""
         try:
             with open(SAVE_PATH) as f:
                 d = json.load(f)
@@ -1953,6 +2172,9 @@ def get_highest_tier_index(game: Game):
 
 
 def draw_handshake(game: Game):
+    """Zeichnet das TCP-Handshake-Skillshot über dem Klick-Kreis: Leitung,
+    fliegendes Paket und Phasen-Label (SYN/SYN-ACK/ACK). Nur sichtbar, während
+    hs_state gesetzt ist."""
     if game.hs_state is None:
         return
     now = pygame.time.get_ticks()
@@ -2111,6 +2333,8 @@ def _bg_vignette(w, h):
     return _cache_put(key, s)
 
 def draw_background(game: Game):
+    """Zeichnet den statischen Spielfeld-Hintergrund (Basis-Ton, Punkt-/Linien-
+    Raster, Scanlines, Horizont-Glow, Vignette). Gecachte Layer aus _bg_*."""
     # Flat-Base aus Design-bg statt Gradient (Cyberpunk wirkt mit ruhigem Hintergrund)
     screen.fill(BG)
 
@@ -2182,6 +2406,9 @@ def _draw_outlined_text(surf, font, txt, x, y, stroke_col, anchor="midtop"):
     return rect
 
 def draw_left(game: Game, net: NetViz):
+    """Zeichnet die linke HUD-Spalte: Titel, Paket-/pps-/RFC-Anzeige, den großen
+    Klick-Kreis mit Effekten (Glow, Scan-Ringe, NetViz), das Handshake-Skillshot
+    und unten den Prestige-Button."""
     # Header-Panel mit dünnem Rand + L-Eckklammern (Cyberpunk-HUD-Stil)
     header_rect = pygame.Rect(10, 6, LEFT_W - 20, 178)
     draw_rect_border(screen, BORDER, header_rect, fill=PANEL, radius=10,
@@ -2534,6 +2761,8 @@ TAB_RECTS = {
 
 
 def draw_tabs(game: Game):
+    """Zeichnet die Tab-Leiste (Upgrades / Forschung; Forschung gesperrt bis RFC
+    frei ist) sowie den Stats-Button oben rechts."""
     for tid, rect in TAB_RECTS.items():
         active = (game.tab == tid)
         locked = (tid == "research" and not game.rfc_unlocked)
@@ -2566,6 +2795,9 @@ def draw_tabs(game: Game):
 
 
 def draw_shop(game: Game):
+    """Zeichnet die scrollbare Upgrade-Liste (eine Karte je UPGRADES-Eintrag) mit
+    Badge, pps, Preis und Kauf-/Challenge-Button. Geometrie: ITEM_H/SHOP_TOP —
+    muss zu max_scroll_shop in main() passen."""
     ITEM_H, SHOP_TOP = 92, 48
     SHOP_X = LEFT_W + 8
     SHOP_W = W - LEFT_W - 16
@@ -2688,6 +2920,9 @@ def _node_rect(pos) -> pygame.Rect:
 
 
 def draw_research(game: Game):
+    """Zeichnet den Forschungsbaum (Knoten + Prereq-Verbindungslinien), die
+    RFC-Anzeige und den RFC-Shop-Button. Knotenstatus (erforscht/verfügbar/
+    gesperrt) bestimmt Farbe und Beschriftung."""
     RES_TOP = 42
 
     # RFC-Anzeige
@@ -3073,6 +3308,10 @@ def _ff_drop_zones():
     return zones
 
 
+# ── Minispiel-Rendering ───────────────────────────────────────────────
+# draw_minigame() zeichnet das Dim-Overlay + Panel und verzweigt nach mg["type"]
+# in die jeweilige _draw_*-Funktion. MG_TUTORIAL_TEXT liefert den Erklärtext, der
+# beim ersten Spielen jedes Typs gezeigt wird (Key = Minispiel-Typ).
 MG_TUTORIAL_TEXT = {
     "cable_patch": {
         "title": "KABEL VERBINDEN",
@@ -3188,6 +3427,9 @@ def draw_mg_tutorial(game: Game):
 
 
 def draw_minigame(game: Game):
+    """Rendert das aktive Minispiel als modales Overlay: abdunkeln, Panel rahmen,
+    dann je nach mg["type"] an die passende _draw_*-Funktion delegieren (bzw. das
+    Tutorial zeigen). Neuer Typ: hier einen Dispatch-Zweig ergänzen."""
     mg = game.minigame
     if mg is None: return
 
@@ -4788,6 +5030,11 @@ def play_intro_video(path):
     return True
 
 def main():
+    """Einstiegspunkt + Hauptschleife. Spielt das Intro-Video, erzeugt die
+    eine Game-Instanz und die Animationshelfer und läuft dann endlos:
+    Eingaben verarbeiten → game.update(dt) → passend zum game.state zeichnen →
+    Display flippen. Alle Eingabe-Routing-Entscheidungen (Popups vor Spielfeld,
+    Tab-/Shop-/Minispiel-Klicks, Tasten) stehen im Event-Loop weiter unten."""
     intro_played = play_intro_video(_asset("abcdef_abcdef_abcdef_abcdefmp_.mp4"))
     game     = Game()
     net      = NetViz(LEFT_W//2, 335, 90)
@@ -4883,6 +5130,13 @@ def main():
             if event.type == pygame.MOUSEBUTTONDOWN:
                 mx, my = event.pos
                 if event.button == 1:
+                    # Linksklick-Routing — Reihenfolge = Priorität (oben gewinnt):
+                    # 1) Nicht-Spielzustände (Menüs) fangen alles ab.
+                    # 2) In "playing" haben modale Overlays Vorrang vor dem Spielfeld
+                    #    (Debug → Offline → RFC-Shop → Event-Wahl → Intro/RFC-Intro
+                    #    → Minispiel), jeweils mit `continue`, wenn konsumiert.
+                    # 3) Erst danach Spielfeld-Klicks (DDoS, Handshake, Tabs, Shop …).
+                    # Neues Popup: hier an passender Stelle (vor dem Spielfeld) einklinken.
                     if game.state == "exit_confirm":
                         exit_confirm_click(game, mx, my)
                         continue

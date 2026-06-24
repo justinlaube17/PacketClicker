@@ -212,24 +212,30 @@ RFC_COL    = (255,  43, 214)   # magenta für RFC
 SHADOW     = (  0,   0,   0)
 
 # ── Fonts (JetBrains Mono / Space Grotesk wenn verfügbar) ─────────────
+# Echte TTFs rendern bei gleicher Groessenzahl groesser als die frueher (per
+# Bug) genutzte pygame-Standardschrift. Dieser Faktor gleicht die gewohnte
+# Schriftgroesse wieder an, ohne alle Aufrufstellen anzufassen.
+_FONT_SCALE = 0.60
+
 def _font(size, bold=False, display=False):
-    # Mitgelieferte DejaVu Sans Mono bevorzugen: garantiert vollstaendige und
-    # plattformuebergreifend identische Glyphen (Pfeile, Box-Drawing, Symbole).
-    # Verhindert "Tofu"-Kaestchen, wenn eine Wunschschrift nicht installiert ist
-    # — pygame.font.SysFont liefert bei fehlender Schrift naemlich still die
-    # glyphenarme Standardschrift statt None zurueck.
+    # Mitgelieferte DejaVu Sans bevorzugen: proportionale Sans-Serif (wie die
+    # vorher gewohnte Optik), aber mit vollstaendigen und plattformuebergreifend
+    # identischen Glyphen (Pfeile, Box-Drawing, Symbole) — verhindert "Tofu".
+    # pygame.font.SysFont liefert bei fehlender Schrift still die glyphenarme
+    # Standardschrift statt None zurueck, deshalb laden wir die Datei direkt.
+    px = max(6, round(size * _FONT_SCALE))
     try:
-        bundled = _asset("DejaVuSansMono-Bold.ttf" if bold else "DejaVuSansMono.ttf")
+        bundled = _asset("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf")
         if os.path.exists(bundled):
-            return pygame.font.Font(bundled, size)
+            return pygame.font.Font(bundled, px)
     except Exception:
         pass
-    # Fallback: erstbeste tatsaechlich installierte Monospace-Systemschrift.
-    for name in ("JetBrains Mono", "DejaVu Sans Mono", "Courier New", "monospace"):
+    # Fallback: erstbeste tatsaechlich installierte Sans-Serif-Systemschrift.
+    for name in ("DejaVu Sans", "FreeSans", "Arial", "Helvetica", "sans"):
         path = pygame.font.match_font(name, bold=bold)
         if path:
             try:
-                return pygame.font.Font(path, size)
+                return pygame.font.Font(path, px)
             except Exception:
                 pass
     return pygame.font.Font(None, size)

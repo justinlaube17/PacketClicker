@@ -1,7 +1,7 @@
 Bundled fonts
 =============
 
-DejaVuSansMono.ttf, DejaVuSansMono-Bold.ttf
+DejaVuSans.ttf, DejaVuSans-Bold.ttf
   DejaVu Fonts — https://dejavu-fonts.github.io/
   Licensed under the DejaVu Fonts License (a permissive, redistributable
   license based on the Bitstream Vera Fonts License). The fonts are free to

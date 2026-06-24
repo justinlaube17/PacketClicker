@@ -48,6 +48,8 @@ jobs:
             --name "PacketClicker" \
             --add-data "bgm.ogg:." \
             --add-data "Packet_Clicker.mp3:." \
+            --add-data "DejaVuSansMono.ttf:." \
+            --add-data "DejaVuSansMono-Bold.ttf:." \
             packet_clicker.py
 
       - name: Zip .app
@@ -89,6 +91,8 @@ jobs:
             --name "PacketClicker" \
             --add-data "bgm.ogg:." \
             --add-data "Packet_Clicker.mp3:." \
+            --add-data "DejaVuSansMono.ttf:." \
+            --add-data "DejaVuSansMono-Bold.ttf:." \
             packet_clicker.py
 
       - name: Upload artifact
@@ -121,6 +125,8 @@ jobs:
             --name "PacketClicker" `
             --add-data "bgm.ogg;." `
             --add-data "Packet_Clicker.mp3;." `
+            --add-data "DejaVuSansMono.ttf;." `
+            --add-data "DejaVuSansMono-Bold.ttf;." `
             packet_clicker.py
 
       - name: Upload artifact

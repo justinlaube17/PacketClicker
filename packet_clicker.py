@@ -212,18 +212,32 @@ RFC_COL    = (255,  43, 214)   # magenta für RFC
 SHADOW     = (  0,   0,   0)
 
 # ── Fonts (JetBrains Mono / Space Grotesk wenn verfügbar) ─────────────
+# Echte TTFs rendern bei gleicher Groessenzahl groesser als die frueher (per
+# Bug) genutzte pygame-Standardschrift. Dieser Faktor gleicht die gewohnte
+# Schriftgroesse wieder an, ohne alle Aufrufstellen anzufassen.
+_FONT_SCALE = 0.60
+
 def _font(size, bold=False, display=False):
-    candidates = (
-        ("Space Grotesk", "JetBrains Mono", "DejaVu Sans Mono", "Courier New", "monospace")
-        if display else
-        ("JetBrains Mono", "DejaVu Sans Mono", "Courier New", "monospace")
-    )
-    for name in candidates:
-        try:
-            f = pygame.font.SysFont(name, size, bold=bold)
-            if f is not None: return f
-        except Exception:
-            pass
+    # Mitgelieferte DejaVu Sans bevorzugen: proportionale Sans-Serif (wie die
+    # vorher gewohnte Optik), aber mit vollstaendigen und plattformuebergreifend
+    # identischen Glyphen (Pfeile, Box-Drawing, Symbole) — verhindert "Tofu".
+    # pygame.font.SysFont liefert bei fehlender Schrift still die glyphenarme
+    # Standardschrift statt None zurueck, deshalb laden wir die Datei direkt.
+    px = max(6, round(size * _FONT_SCALE))
+    try:
+        bundled = _asset("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf")
+        if os.path.exists(bundled):
+            return pygame.font.Font(bundled, px)
+    except Exception:
+        pass
+    # Fallback: erstbeste tatsaechlich installierte Sans-Serif-Systemschrift.
+    for name in ("DejaVu Sans", "FreeSans", "Arial", "Helvetica", "sans"):
+        path = pygame.font.match_font(name, bold=bold)
+        if path:
+            try:
+                return pygame.font.Font(path, px)
+            except Exception:
+                pass
     return pygame.font.Font(None, size)
 
 font_xl       = _font(48, bold=True, display=True)
@@ -2862,7 +2876,7 @@ def draw_shop(game: Game):
             if not available:
                 bcol = BORDER
                 bg   = PANEL
-                lbl  = "🔒 LOCKED"
+                lbl  = "⊘ LOCKED"
                 dim  = pygame.Surface((card_rect.w, card_rect.h), pygame.SRCALPHA)
                 dim.fill((0, 0, 0, 100))
                 screen.blit(dim, card_rect.topleft)
@@ -3846,7 +3860,7 @@ def _draw_packet_inspector(game: Game, mg, px, py):
         if fb["type"] == "correct":
             msg = f"✓  KORREKT  ·  {fb['verdict'].upper()}"
         elif fb["type"] == "timeout":
-            msg = f"⌛  TIMEOUT  ·  expected {fb['expected'].upper()}"
+            msg = f"⊗  TIMEOUT  ·  expected {fb['expected'].upper()}"
         else:
             msg = f"✗  FALSCH  ·  expected {fb['expected'].upper()}"
         text(screen, font_big, msg, col,

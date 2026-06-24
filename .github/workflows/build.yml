@@ -62,6 +62,42 @@ jobs:
           path: PacketClicker_macOS.zip
           retention-days: 30
 
+  build-linux:
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsdl2-2.0-0 libsdl2-mixer-2.0-0 libsdl2-image-2.0-0 libsdl2-ttf-2.0-0 libgl1
+
+      - name: Install dependencies
+        run: pip install pygame==2.6.1 pyinstaller
+
+      - name: Build binary with PyInstaller
+        run: |
+          pyinstaller \
+            --onefile \
+            --name "PacketClicker" \
+            --add-data "bgm.ogg:." \
+            --add-data "Packet_Clicker.mp3:." \
+            packet_clicker.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PacketClicker-Linux
+          path: dist/PacketClicker
+          retention-days: 30
+
   build-windows:
     needs: test
     runs-on: windows-latest
@@ -95,7 +131,7 @@ jobs:
           retention-days: 30
 
   release:
-    needs: [build-windows, build-macos]
+    needs: [build-windows, build-macos, build-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -113,6 +149,19 @@ jobs:
           name: PacketClicker-macOS
           path: release/
 
+      - name: Download Linux build
+        uses: actions/download-artifact@v4
+        with:
+          name: PacketClicker-Linux
+          path: release-linux/
+
+      - name: Prepare Linux asset
+        run: |
+          # download-artifact verliert das Executable-Bit; wiederherstellen
+          # und mit eindeutigem Namen ins Release-Verzeichnis kopieren.
+          chmod +x release-linux/PacketClicker
+          cp release-linux/PacketClicker release/PacketClicker-Linux
+
       - name: Publish latest release
         run: |
           # Bestehendes Release + Tag entfernen, damit 'create' nicht an
@@ -124,9 +173,10 @@ jobs:
           gh release create latest \
             release/PacketClicker.exe \
             release/PacketClicker_macOS.zip \
+            release/PacketClicker-Linux \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "Packet Clicker — Latest Build" \
-            --notes "Automatisch gebaut vom neusten Commit. Windows: PacketClicker.exe · macOS: PacketClicker_macOS.zip"
+            --notes "Automatisch gebaut vom neusten Commit. Windows: PacketClicker.exe · macOS: PacketClicker_macOS.zip · Linux: PacketClicker-Linux"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
